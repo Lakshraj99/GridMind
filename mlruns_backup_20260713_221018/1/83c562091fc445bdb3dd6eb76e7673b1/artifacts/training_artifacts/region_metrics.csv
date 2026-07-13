@@ -1,0 +1,6 @@
+model_name,region,mae,rmse,wape,mase,forecast_bias
+last_value,PJM,8.25,8.25,0.007637121036797038,,-8.25
+seasonal_naive_24h,PJM,6.0,6.0,0.0055542698449433,,-6.0
+seasonal_naive_168h,PJM,0.0,0.0,0.0,,0.0
+seasonal_naive_average_24h_168h,PJM,3.0,3.0,0.00277713492247165,,-3.0
+lightgbm_global,PJM,14.25,14.25,0.013191390881740338,,-14.25

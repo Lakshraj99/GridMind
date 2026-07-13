@@ -1,0 +1,14 @@
+artifact_uri: /Users/lakshraj/Documents/Projects/gridmind/mlruns/414089671536392554/28c6ad58d143412fb3419ecb0ed434e5/artifacts
+end_time: 1783957761047
+entry_point_name: ''
+experiment_id: '414089671536392554'
+lifecycle_stage: active
+run_id: 28c6ad58d143412fb3419ecb0ed434e5
+run_name: seasonal_naive_168h
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1783957761040
+status: 3
+tags: []
+user_id: lakshraj

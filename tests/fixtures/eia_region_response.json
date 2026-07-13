@@ -1,0 +1,19 @@
+{
+  "response": {
+    "total": "8",
+    "dateFormat": "YYYY-MM-DDTHH24",
+    "frequency": "hourly",
+    "data": [
+      {"period": "2024-01-01T00", "respondent": "PJM", "type": "D", "type-name": "Demand", "value": "1000", "value-units": "megawatthours"},
+      {"period": "2024-01-01T00", "respondent": "PJM", "type": "DF", "type-name": "Demand Forecast", "value": "1010", "value-units": "megawatthours"},
+      {"period": "2024-01-01T00", "respondent": "PJM", "type": "NG", "type-name": "Net Generation", "value": "980", "value-units": "megawatthours"},
+      {"period": "2024-01-01T00", "respondent": "PJM", "type": "TI", "type-name": "Total Interchange", "value": "20", "value-units": "megawatthours"},
+      {"period": "2024-01-01T01", "respondent": "PJM", "type": "D", "type-name": "Demand", "value": "1020", "value-units": "megawatthours"},
+      {"period": "2024-01-01T01", "respondent": "PJM", "type": "DF", "type-name": "Demand Forecast", "value": "1030", "value-units": "megawatthours"},
+      {"period": "2024-01-01T01", "respondent": "PJM", "type": "NG", "type-name": "Net Generation", "value": "990", "value-units": "megawatthours"},
+      {"period": "2024-01-01T01", "respondent": "PJM", "type": "TI", "type-name": "Total Interchange", "value": "30", "value-units": "megawatthours"}
+    ]
+  },
+  "request": {"command": "/v2/electricity/rto/region-data/data/"}
+}
+

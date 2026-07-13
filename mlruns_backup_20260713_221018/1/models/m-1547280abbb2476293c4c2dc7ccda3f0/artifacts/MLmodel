@@ -1,0 +1,19 @@
+artifact_path: /Users/lakshraj/Documents/Projects/gridmind/mlruns/1/models/m-1547280abbb2476293c4c2dc7ccda3f0/artifacts
+flavors:
+  python_function:
+    cloudpickle_version: 2.2.1
+    code: null
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.pyfunc.model
+    python_model: python_model.pkl
+    python_version: 3.12.4
+    streamable: false
+mlflow_version: 3.14.0
+model_id: m-1547280abbb2476293c4c2dc7ccda3f0
+model_size_bytes: 56333
+model_uuid: m-1547280abbb2476293c4c2dc7ccda3f0
+prompts: null
+run_id: 3c1e5b66344a4183b2e20f07ebbe6ae2
+utc_time_created: '2026-07-13 12:55:57.528271'

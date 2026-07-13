@@ -1,0 +1,19 @@
+{
+  "dataset_start": "2024-01-01T00:00:00+00:00",
+  "dataset_end": "2024-01-16T19:00:00+00:00",
+  "row_count": 380,
+  "region_count": 1,
+  "regions": "PJM",
+  "forecast_horizon": 1,
+  "validation_windows": 1,
+  "validation_step_size": 1,
+  "models": "lightgbm",
+  "tuning_enabled": false,
+  "optuna_trials": 20,
+  "random_seed": 42,
+  "primary_metric": "wape",
+  "feature_count": 46,
+  "demand_lags": "1,2,3,6,12,24,48,72,168,336",
+  "rolling_windows": "3,6,12,24,72,168",
+  "git_commit": "unavailable"
+}

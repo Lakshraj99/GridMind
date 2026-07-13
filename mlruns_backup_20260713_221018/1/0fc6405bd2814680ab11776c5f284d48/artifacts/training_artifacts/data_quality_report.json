@@ -1,0 +1,33 @@
+{
+  "row_count": 380,
+  "date_range": {
+    "start": "2024-01-01T00:00:00+00:00",
+    "end": "2024-01-16T19:00:00+00:00"
+  },
+  "region_count": 1,
+  "regions": [
+    "PJM"
+  ],
+  "duplicate_count": 0,
+  "missing_value_count_by_column": {
+    "timestamp_utc": 0,
+    "region": 0,
+    "demand_mw": 0,
+    "forecast_demand_mw": 380,
+    "net_generation_mw": 380,
+    "total_interchange_mw": 380,
+    "ingestion_timestamp_utc": 0
+  },
+  "missing_percentage_by_column": {
+    "timestamp_utc": 0.0,
+    "region": 0.0,
+    "demand_mw": 0.0,
+    "forecast_demand_mw": 100.0,
+    "net_generation_mw": 100.0,
+    "total_interchange_mw": 100.0,
+    "ingestion_timestamp_utc": 0.0
+  },
+  "negative_value_count": 0,
+  "timestamp_gap_count": 0,
+  "expected_hourly_frequency": true
+}

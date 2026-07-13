@@ -1,0 +1,77 @@
+[
+  {
+    "sample_index": "15",
+    "top_contributions": {
+      "region": 0.0,
+      "hour": 0.0,
+      "day_of_week": 0.0,
+      "day_of_month": 0.0,
+      "week_of_year": 0.0,
+      "month": 0.0,
+      "quarter": 0.0,
+      "is_weekend": 0.0,
+      "hour_sin": 0.0,
+      "hour_cos": 0.0
+    }
+  },
+  {
+    "sample_index": "19",
+    "top_contributions": {
+      "region": 0.0,
+      "hour": 0.0,
+      "day_of_week": 0.0,
+      "day_of_month": 0.0,
+      "week_of_year": 0.0,
+      "month": 0.0,
+      "quarter": 0.0,
+      "is_weekend": 0.0,
+      "hour_sin": 0.0,
+      "hour_cos": 0.0
+    }
+  },
+  {
+    "sample_index": "27",
+    "top_contributions": {
+      "region": 0.0,
+      "hour": 0.0,
+      "day_of_week": 0.0,
+      "day_of_month": 0.0,
+      "week_of_year": 0.0,
+      "month": 0.0,
+      "quarter": 0.0,
+      "is_weekend": 0.0,
+      "hour_sin": 0.0,
+      "hour_cos": 0.0
+    }
+  },
+  {
+    "sample_index": "26",
+    "top_contributions": {
+      "region": 0.0,
+      "hour": 0.0,
+      "day_of_week": 0.0,
+      "day_of_month": 0.0,
+      "week_of_year": 0.0,
+      "month": 0.0,
+      "quarter": 0.0,
+      "is_weekend": 0.0,
+      "hour_sin": 0.0,
+      "hour_cos": 0.0
+    }
+  },
+  {
+    "sample_index": "8",
+    "top_contributions": {
+      "region": 0.0,
+      "hour": 0.0,
+      "day_of_week": 0.0,
+      "day_of_month": 0.0,
+      "week_of_year": 0.0,
+      "month": 0.0,
+      "quarter": 0.0,
+      "is_weekend": 0.0,
+      "hour_sin": 0.0,
+      "hour_cos": 0.0
+    }
+  }
+]

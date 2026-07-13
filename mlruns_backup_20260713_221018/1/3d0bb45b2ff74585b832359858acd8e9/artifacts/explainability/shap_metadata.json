@@ -1,0 +1,8 @@
+{
+  "model_name": "lightgbm_global",
+  "model_version": "unregistered",
+  "run_id": "",
+  "sample_rows": 5,
+  "random_seed": 42,
+  "statement": "SHAP describes model behaviour and does not establish causality."
+}
