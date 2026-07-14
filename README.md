@@ -1,14 +1,14 @@
 # GridMind
 
-GridMind is an ML-engineering project for dependable electricity-system forecasting and
-decision support. Milestone 1 established validated EIA ingestion, Parquet/DuckDB storage, and
-deterministic baselines. Milestone 2 adds production-quality 24-hour global demand forecasting
-with LightGBM and CatBoost, nested Optuna tuning, SHAP, MLflow Model Registry, and idempotent
-batch predictions.
+GridMind is an ML-engineering project for dependable electricity-system forecasting, anomaly
+detection, and decision support. Milestones 1–3 established validated EIA/Open-Meteo ingestion,
+Parquet/DuckDB storage, deterministic baselines, weather-aware LightGBM/CatBoost forecasts,
+renewable and net-load targets, Optuna, SHAP, MLflow Model Registry, and idempotent predictions.
+Milestone 4 adds a production-quality three-layer anomaly and alerting workflow while preserving
+all earlier interfaces.
 
-Milestone 2 still deliberately contains **no weather data, solar or wind forecasting,
-probabilistic forecasts, deep learning, anomaly detection, battery optimization, online API
-serving, dashboard, or cloud deployment**.
+GridMind still deliberately contains **no battery optimization, online API, dashboard, Kafka,
+Kubernetes, cloud infrastructure, deep-learning anomaly model, or LLM assistant**.
 
 ## Architecture
 
@@ -29,6 +29,13 @@ flowchart LR
     Compare --> Registry["MLflow candidate / champion"]
     Registry --> Batch["Recursive batch prediction"]
     Batch --> Forecasts["DuckDB demand_forecasts"]
+    DuckDB --> Rules["Data-quality rules"]
+    Forecasts --> Residuals["Leakage-safe residual detector"]
+    DuckDB --> IF["Per-region IsolationForest"]
+    Rules --> Ensemble["Transparent severity ensemble"]
+    Residuals --> Ensemble
+    IF --> Ensemble
+    Ensemble --> Alerts["Deduplicated alert lifecycle"]
 ```
 
 The modules are intentionally cohesive: `data` owns API communication, contracts,
@@ -47,6 +54,8 @@ src/gridmind/          Python package
   models/              LightGBM, CatBoost, bundles, registry promotion
   training/            Dataset adapters, evaluation, Optuna, leaderboard
   explainability/      SHAP importance, plots, and local explanations
+  anomalies/           Rules, residuals, IsolationForest, ensemble, severity, evaluation
+  alerts/              Alert contracts, lifecycle, DuckDB persistence
   pipelines/           Ingest, baseline, train, predict, and explain orchestration
 tests/                 Offline unit and integration tests
 data/raw/              Ignored raw API snapshots
@@ -97,6 +106,10 @@ Register for an [EIA API key](https://www.eia.gov/opendata/register.php), then s
 | `SHAP_SAMPLE_SIZE` | Maximum deterministic explanation sample | `2000` |
 | `LOG_LEVEL` | Python logging level | `INFO` |
 | `MISSING_DEMAND_POLICY` | Missing actual demand: `error` or `drop` | `error` |
+| `ANOMALY_LOOKBACK_HOURS` / `ANOMALY_MIN_TRAINING_ROWS` | Chronological detector history | `720` / `336` |
+| `ANOMALY_CONTAMINATION` / `ANOMALY_RANDOM_SEED` | IsolationForest configuration | `0.01` / `42` |
+| `ALERT_DEDUP_WINDOW_HOURS` / `ALERT_AUTO_RESOLVE_HOURS` | Alert lifecycle windows | `6` / `24` |
+| `ANOMALY_EXPERIMENT_NAME` | MLflow anomaly experiment | `gridmind-anomaly-detection` |
 
 `ENABLE_MLFLOW` is the Milestone 2 spelling; legacy `MLFLOW_ENABLED` remains supported. Milestone
 2 defaults to SQLite because experiment hierarchy, logged models, Registry versions, and
@@ -362,8 +375,115 @@ renewable gaps/missing components/quarantine, demand-renewable overlap, and net-
 - Region-location weights are documented representative assumptions and should be recalibrated
   against subregional load before operational use.
 - Recursive tree forecasts can accumulate error at deeper horizons.
-- This milestone intentionally excludes anomaly detection, battery dispatch, online API serving,
-  dashboards, Kafka, Kubernetes, cloud deployment, deep learning, and LLM assistants.
+- Battery dispatch, online API serving, dashboards, Kafka, Kubernetes, cloud deployment, deep
+  learning, and LLM assistants remain outside Milestones 1–4.
+
+## Milestone 4: anomaly detection and alerts
+
+Milestone 4 evaluates operational observations without silently repairing them. Raw detector
+events remain separate from alerts, and every event has a deterministic natural-key identifier,
+UTC timestamp, model lineage where relevant, numeric score, explanation, and JSON detector
+contributions.
+
+```mermaid
+flowchart TD
+    OBS["Grid, renewable, and weather observations"] --> RULES["Layer 1: deterministic rules"]
+    ACTUAL["Actual target"] --> RESIDUAL["Layer 2: forecast residual"]
+    FORECAST["Latest valid earlier forecast origin"] --> RESIDUAL
+    OBS --> MULTI["Layer 3: chronological per-region IsolationForest"]
+    RULES --> VOTE["Transparent ensemble"]
+    RESIDUAL --> VOTE
+    MULTI --> VOTE
+    VOTE --> SCORE["Explicit 0–100 severity score"]
+    SCORE --> EVENTS["anomaly_events"]
+    EVENTS --> DEDUP["Deduplicate by region, target, type, and time window"]
+    DEDUP --> OPEN["open"]
+    OPEN --> ACK["acknowledged"]
+    OPEN --> SUP["suppressed"]
+    ACK --> RES["resolved"]
+    OPEN --> RES
+    RES --> HISTORY["immutable alert_history"]
+```
+
+### Three detector layers
+
+The rule detector checks missing, duplicate, non-monotonic and unexpected hourly timestamps;
+invalid signs and non-finite measurements; impossible humidity, cloud, and radiation ranges;
+abrupt demand/renewable changes; flatlines; stale data; and grid/weather coverage mismatches.
+Rules never interpolate or mutate source data.
+
+The residual detector aligns each actual with the latest stored forecast whose origin is strictly
+earlier than the target timestamp. Rolling mean, standard deviation, median, MAD, z-score, and
+robust MAD score use only earlier residuals. Missing actuals/predictions and insufficient-history
+rows are reported but not scored. Solar anomalies are scored separately from non-daylight
+low-generation periods, and forecast model/version/run lineage is preserved.
+
+IsolationForest uses deterministic seeds, an explicit feature order, and independent regional
+models. Training data chronologically precedes scoring data; incomplete feature rows are counted
+and excluded rather than imputed. Bundles and schemas record their regional training cutoff.
+Feature-deviation summaries describe association only—they are not causal explanations. The
+configured contamination is an algorithm parameter, not evidence of real anomaly prevalence.
+
+### Ensemble and severity
+
+Individual events are not hidden. The ensemble stores each detector, anomaly type, score,
+severity, identifier, and source metadata. A critical deterministic rule or residual result is a
+critical override; two warning votes elevate a warning; IsolationForest alone remains info or
+warning depending on its score; rule/residual agreement increases detector agreement.
+
+The normalized severity formula is explicit: magnitude contributes 45 points, duration 15,
+detector agreement 20, target importance 10, recurrence 5, and incomplete data may subtract up
+to 5. Scores `0–29` are info, `30–69` warning, and `70–100` critical.
+
+### Alert lifecycle and DuckDB
+
+`anomaly_events` stores idempotent raw and ensemble events. `grid_alerts` stores current alert
+state, while `alert_history` preserves every opening, occurrence, acknowledgement, suppression,
+manual resolution, and healthy-period automatic resolution. Repeated anomalies inside
+`ALERT_DEDUP_WINDOW_HOURS` increment occurrence count; severity may escalate but an active
+critical alert is never automatically downgraded. Reprocessing the same anomaly identifier is
+idempotent. All tables and queries use UTC DuckDB sessions.
+
+### Commands
+
+```bash
+gridmind detect-anomalies --region PJM \
+  --targets demand_mw,solar_generation_mw,wind_generation_mw,net_load_mw \
+  --start-date 2026-07-01 --end-date 2026-07-14 \
+  --detectors rules,residual,isolation_forest
+
+gridmind anomaly-backtest --region PJM --target demand_mw \
+  --start-date 2025-01-01 --end-date 2025-12-31 --inject --seed 42
+
+gridmind anomalies --region PJM --severity warning --start-date 2026-07-01
+gridmind anomalies --region PJM --csv artifacts/anomalies/pjm_events.csv
+gridmind alerts --status open --severity critical
+gridmind alert-update --alert-id <alert-id> --status acknowledged
+```
+
+Commands print evaluated/detected counts, severity and detector distributions, alert changes,
+metrics where labels exist, and artifact paths. `--no-mlflow` keeps detection and backtesting
+fully local without tracking.
+
+### Backtesting, artifacts, and limitations
+
+Backtests inject deterministic single/multi-hour spikes or drops, solar collapse, wind spike,
+flatline, missing hours, weather corruption, gradual drift, and contextual anomalies into a deep
+copy of historical data. They report precision, recall, F1, delay, false positives per day,
+severity accuracy, and per-type recall under `artifacts/anomaly_backtests/<timestamp>/`. Original
+Parquet and DuckDB observations are never changed. Detection outputs, detector schema, thresholds,
+events, and alert summaries are stored under `artifacts/anomalies/<timestamp>/`, outside all
+partitioned data directories.
+
+When enabled, MLflow experiment `gridmind-anomaly-detection` logs date/region/target scope,
+thresholds, IsolationForest parameters, training/excluded rows, metrics, detector bundle, feature
+schema, package/Python version, Git commit, and report artifacts. Secrets and `.env` contents are
+never logged.
+
+**Synthetic anomaly labels are controlled test cases, not real incidents. Unsupervised anomaly
+scores do not prove a grid or system failure. Human review is required before operational action.**
+Synthetic-injection metrics must not be presented as performance on real labelled incidents.
+Online email/Slack/SMS delivery and battery optimization are not included.
 
 ## Testing and quality
 
@@ -434,6 +554,8 @@ not distributed concurrent writers. MASE currently uses first-difference actuals
 evaluated sample as its scaling series. No negative-output clamp is enabled; invalid model
 output fails explicitly.
 
-Planned milestones add weather ingestion, solar and wind forecasting, probabilistic forecasts,
-anomaly detection, battery-dispatch optimization, then online serving, dashboards, and cloud
-infrastructure only when justified.
+Milestones 1–4 now cover ingestion, deterministic and ML forecasting, weather/renewable/net-load
+targets, anomaly detection, and local alert lifecycle management. Future work may add
+probabilistic forecasts and calibrated real-incident evaluation, followed by battery-dispatch
+optimization. Online delivery, serving, dashboards, and cloud infrastructure remain later work
+and should be added only with explicit reliability and operational requirements.

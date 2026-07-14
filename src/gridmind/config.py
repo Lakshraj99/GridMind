@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from gridmind.exceptions import ConfigurationError
@@ -98,6 +98,31 @@ class Settings(BaseSettings):
     net_load_model_name: str = Field(
         default="gridmind-net-load-forecast", alias="NET_LOAD_MODEL_NAME"
     )
+    anomaly_detection_enabled: bool = Field(default=True, alias="ANOMALY_DETECTION_ENABLED")
+    anomaly_lookback_hours: int = Field(default=720, gt=0, alias="ANOMALY_LOOKBACK_HOURS")
+    anomaly_min_training_rows: int = Field(default=336, gt=0, alias="ANOMALY_MIN_TRAINING_ROWS")
+    anomaly_contamination: float = Field(
+        default=0.01, gt=0.0, lt=0.5, alias="ANOMALY_CONTAMINATION"
+    )
+    anomaly_random_seed: int = Field(default=42, alias="ANOMALY_RANDOM_SEED")
+    residual_zscore_warning: float = Field(default=2.5, gt=0.0, alias="RESIDUAL_ZSCORE_WARNING")
+    residual_zscore_critical: float = Field(default=4.0, gt=0.0, alias="RESIDUAL_ZSCORE_CRITICAL")
+    residual_mad_warning: float = Field(default=3.5, gt=0.0, alias="RESIDUAL_MAD_WARNING")
+    residual_mad_critical: float = Field(default=6.0, gt=0.0, alias="RESIDUAL_MAD_CRITICAL")
+    demand_spike_pct_threshold: float = Field(
+        default=0.20, ge=0.0, alias="DEMAND_SPIKE_PCT_THRESHOLD"
+    )
+    renewable_drop_pct_threshold: float = Field(
+        default=0.30, ge=0.0, alias="RENEWABLE_DROP_PCT_THRESHOLD"
+    )
+    flatline_hours: int = Field(default=4, gt=0, alias="FLATLINE_HOURS")
+    missing_hour_warning_count: int = Field(default=1, gt=0, alias="MISSING_HOUR_WARNING_COUNT")
+    missing_hour_critical_count: int = Field(default=3, gt=0, alias="MISSING_HOUR_CRITICAL_COUNT")
+    alert_dedup_window_hours: int = Field(default=6, gt=0, alias="ALERT_DEDUP_WINDOW_HOURS")
+    alert_auto_resolve_hours: int = Field(default=24, gt=0, alias="ALERT_AUTO_RESOLVE_HOURS")
+    anomaly_experiment_name: str = Field(
+        default="gridmind-anomaly-detection", alias="ANOMALY_EXPERIMENT_NAME"
+    )
 
     @field_validator("weather_lags", "weather_rolling_windows", mode="before")
     @classmethod
@@ -132,6 +157,16 @@ class Settings(BaseSettings):
         if not parsed or not set(parsed).issubset(allowed):
             raise ValueError(f"RENEWABLE_TARGETS must contain only {sorted(allowed)}.")
         return parsed
+
+    @model_validator(mode="after")
+    def _validate_anomaly_threshold_order(self) -> Settings:
+        if self.residual_zscore_critical <= self.residual_zscore_warning:
+            raise ValueError("RESIDUAL_ZSCORE_CRITICAL must exceed its warning threshold.")
+        if self.residual_mad_critical <= self.residual_mad_warning:
+            raise ValueError("RESIDUAL_MAD_CRITICAL must exceed its warning threshold.")
+        if self.missing_hour_critical_count <= self.missing_hour_warning_count:
+            raise ValueError("MISSING_HOUR_CRITICAL_COUNT must exceed its warning count.")
+        return self
 
     def require_eia_api_key(self) -> str:
         """Return the API key or raise an actionable configuration error."""

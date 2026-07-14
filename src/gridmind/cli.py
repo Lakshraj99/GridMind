@@ -12,6 +12,7 @@ import pandas as pd
 import typer
 from mlflow.exceptions import MlflowException
 
+from gridmind.anomalies.storage import AnomalyStorage
 from gridmind.config import get_settings
 from gridmind.data.processing import generate_quality_report
 from gridmind.data.schemas import validate_processed_data
@@ -22,9 +23,12 @@ from gridmind.data.storage import (
 )
 from gridmind.exceptions import GridMindError, StorageError
 from gridmind.logging_config import configure_logging
+from gridmind.pipelines.backtest_anomalies import run_anomaly_backtest
 from gridmind.pipelines.baseline import run_baseline_pipeline
+from gridmind.pipelines.detect_anomalies import run_anomaly_detection
 from gridmind.pipelines.explain import run_explain_pipeline
 from gridmind.pipelines.ingest import run_ingestion
+from gridmind.pipelines.manage_alerts import list_alerts, update_alert_status
 from gridmind.pipelines.predict import run_prediction_pipeline
 from gridmind.pipelines.predict_target import run_target_prediction
 from gridmind.pipelines.renewable_ingest import run_renewable_ingestion
@@ -45,6 +49,19 @@ class MissingDemandPolicyOption(StrEnum):
 
     error = "error"
     drop = "drop"
+
+
+class SeverityOption(StrEnum):
+    info = "info"
+    warning = "warning"
+    critical = "critical"
+
+
+class AlertStatusOption(StrEnum):
+    open = "open"
+    acknowledged = "acknowledged"
+    resolved = "resolved"
+    suppressed = "suppressed"
 
 
 @app.callback()
@@ -470,6 +487,176 @@ def target_leaderboard(
         typer.echo(f"No leaderboard is available for {target}.", err=True)
         raise typer.Exit(code=1)
     typer.echo(pd.read_csv(paths[-1]).to_string(index=False))
+
+
+@app.command("detect-anomalies")
+def detect_anomalies_command(
+    region: Annotated[str, typer.Option(help="Grid region to evaluate.")],
+    targets: Annotated[str, typer.Option(help="Comma-separated supported targets.")],
+    start_date: Annotated[str, typer.Option(help="Inclusive UTC start date/timestamp.")],
+    end_date: Annotated[str, typer.Option(help="Inclusive UTC end date/timestamp.")],
+    detectors: Annotated[
+        str, typer.Option(help="Comma-separated rules,residual,isolation_forest.")
+    ] = "rules,residual,isolation_forest",
+    mlflow_enabled: Annotated[bool, typer.Option("--mlflow/--no-mlflow")] = True,
+) -> None:
+    """Detect, persist, ensemble, and alert on operational anomalies."""
+    try:
+        result = run_anomaly_detection(
+            get_settings(),
+            region=region,
+            targets=tuple(item.strip() for item in targets.split(",") if item.strip()),
+            start_date=start_date,
+            end_date=end_date,
+            detectors=tuple(item.strip() for item in detectors.split(",") if item.strip()),
+            mlflow_enabled=mlflow_enabled,
+        )
+    except (GridMindError, MlflowException, OSError, ValueError, RuntimeError) as exc:
+        typer.echo(f"Anomaly detection failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    severity_counts = result.anomalies["severity"].value_counts().to_dict()
+    detector_counts = result.anomalies["detector_name"].value_counts().to_dict()
+    typer.echo(f"Rows evaluated: {result.rows_evaluated:,}")
+    typer.echo(f"Anomalies found: {len(result.anomalies):,}")
+    typer.echo(f"Severity counts: {severity_counts}")
+    typer.echo(f"Detector counts: {detector_counts}")
+    typer.echo(f"Alerts opened: {result.alerts_opened}; updated: {result.alerts_updated}")
+    typer.echo(f"Artifacts: {result.artifact_dir}")
+
+
+@app.command("anomaly-backtest")
+def anomaly_backtest_command(
+    region: Annotated[str, typer.Option(help="Grid region to evaluate.")],
+    target: Annotated[str, typer.Option(help="Supported target to evaluate.")],
+    start_date: Annotated[str, typer.Option(help="Inclusive UTC start date/timestamp.")],
+    end_date: Annotated[str, typer.Option(help="Inclusive UTC end date/timestamp.")],
+    inject: Annotated[bool, typer.Option("--inject/--no-inject")] = True,
+    seed: Annotated[int, typer.Option(help="Deterministic injection seed.")] = 42,
+    mlflow_enabled: Annotated[bool, typer.Option("--mlflow/--no-mlflow")] = True,
+) -> None:
+    """Evaluate anomaly rules using synthetic injection or unsupervised reporting."""
+    try:
+        result = run_anomaly_backtest(
+            get_settings(),
+            region=region,
+            target=target,
+            start_date=start_date,
+            end_date=end_date,
+            inject=inject,
+            seed=seed,
+            mlflow_enabled=mlflow_enabled,
+        )
+    except (GridMindError, MlflowException, OSError, ValueError, RuntimeError) as exc:
+        typer.echo(f"Anomaly backtest failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Injected anomaly count: {result.injected_count}")
+    typer.echo(f"Detected count: {result.detected_count}")
+    for name in (
+        "precision",
+        "recall",
+        "f1",
+        "false_positives_per_day",
+        "mean_detection_delay_hours",
+    ):
+        if name in result.metrics:
+            typer.echo(f"{name}: {result.metrics[name]:.6f}")
+    typer.echo("Synthetic labels are controlled test cases, not real grid incidents.")
+    typer.echo(f"Artifacts: {result.artifact_dir}")
+
+
+@app.command("anomalies")
+def list_anomalies_command(
+    region: Annotated[str | None, typer.Option(help="Optional grid region.")] = None,
+    target: Annotated[str | None, typer.Option(help="Optional target.")] = None,
+    severity: Annotated[SeverityOption | None, typer.Option(help="Optional severity.")] = None,
+    detector: Annotated[str | None, typer.Option(help="Optional detector name.")] = None,
+    start_date: Annotated[str | None, typer.Option(help="Optional UTC start.")] = None,
+    end_date: Annotated[str | None, typer.Option(help="Optional UTC end.")] = None,
+    csv_path: Annotated[
+        Path | None, typer.Option("--csv", help="Optional CSV output path.")
+    ] = None,
+) -> None:
+    """List persisted anomaly events with optional filters."""
+    try:
+        frame = AnomalyStorage(get_settings().duckdb_path).read(
+            region=region,
+            target=target,
+            severity=severity.value if severity else None,
+            detector=detector,
+            start=start_date,
+            end=end_date,
+        )
+        _write_or_display(frame, csv_path, ("timestamp_utc", "forecast_origin", "detected_at_utc"))
+    except (GridMindError, OSError, ValueError, RuntimeError) as exc:
+        typer.echo(f"Anomaly listing failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("alerts")
+def list_alerts_command(
+    region: Annotated[str | None, typer.Option(help="Optional grid region.")] = None,
+    target: Annotated[str | None, typer.Option(help="Optional target.")] = None,
+    status: Annotated[AlertStatusOption | None, typer.Option(help="Optional status.")] = None,
+    severity: Annotated[SeverityOption | None, typer.Option(help="Optional severity.")] = None,
+    csv_path: Annotated[
+        Path | None, typer.Option("--csv", help="Optional CSV output path.")
+    ] = None,
+) -> None:
+    """List current alerts separately from raw anomaly events."""
+    try:
+        frame = list_alerts(
+            get_settings(),
+            region=region,
+            target=target,
+            status=status.value if status else None,
+            severity=severity.value if severity else None,
+        )
+        _write_or_display(
+            frame,
+            csv_path,
+            (
+                "first_seen_utc",
+                "last_seen_utc",
+                "acknowledged_at_utc",
+                "resolved_at_utc",
+                "created_at_utc",
+                "updated_at_utc",
+            ),
+        )
+    except (GridMindError, OSError, ValueError, RuntimeError) as exc:
+        typer.echo(f"Alert listing failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("alert-update")
+def alert_update_command(
+    alert_id: Annotated[str, typer.Option(help="Alert identifier.")],
+    status: Annotated[AlertStatusOption, typer.Option(help="New lifecycle status.")],
+) -> None:
+    """Acknowledge, resolve, suppress, or reopen a persisted alert."""
+    try:
+        alert = update_alert_status(get_settings(), alert_id=alert_id, status=status.value)
+    except (GridMindError, OSError, ValueError, RuntimeError) as exc:
+        typer.echo(f"Alert update failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Updated alert {alert['alert_id']} to {alert['status']}.")
+
+
+def _write_or_display(
+    frame: pd.DataFrame, csv_path: Path | None, timestamp_columns: tuple[str, ...]
+) -> None:
+    display = frame.copy()
+    for column in timestamp_columns:
+        if column in display:
+            display[column] = display[column].map(
+                lambda value: format_utc_timestamp(value) if pd.notna(value) else ""
+            )
+    if csv_path is not None:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        display.to_csv(csv_path, index=False)
+        typer.echo(f"CSV: {csv_path}")
+    else:
+        typer.echo(display.to_string(index=False) if not display.empty else "No records found.")
 
 
 if __name__ == "__main__":  # pragma: no cover

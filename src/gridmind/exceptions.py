@@ -91,3 +91,11 @@ class RenewableDataError(GridMindError):
 
 class TargetForecastError(GridMindError):
     """Raised for unsupported or invalid Milestone 3 target workflows."""
+
+
+class AnomalyDetectionError(GridMindError):
+    """Raised when anomaly detection or evaluation cannot complete safely."""
+
+
+class AlertLifecycleError(GridMindError):
+    """Raised when an alert transition violates the lifecycle contract."""
