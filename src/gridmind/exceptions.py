@@ -99,3 +99,7 @@ class AnomalyDetectionError(GridMindError):
 
 class AlertLifecycleError(GridMindError):
     """Raised when an alert transition violates the lifecycle contract."""
+
+
+class BatteryOptimizationError(GridMindError):
+    """Raised when battery dispatch inputs, solving, or validation fail safely."""

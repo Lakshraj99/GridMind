@@ -26,6 +26,7 @@ dependencies = [
   "pyarrow>=14,<21",
   "pydantic-settings>=2.5,<3",
   "pyyaml>=6,<7",
+  "scipy>=1.11,<2",
   "scikit-learn>=1.5,<2",
   "shap>=0.46,<1",
   "typer>=0.12,<1",
@@ -80,6 +81,7 @@ module = [
   "sklearn.*",
   "yaml.*",
   "shap.*",
+  "scipy.*",
 ]
 ignore_missing_imports = true
 

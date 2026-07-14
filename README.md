@@ -4,11 +4,12 @@ GridMind is an ML-engineering project for dependable electricity-system forecast
 detection, and decision support. Milestones 1–3 established validated EIA/Open-Meteo ingestion,
 Parquet/DuckDB storage, deterministic baselines, weather-aware LightGBM/CatBoost forecasts,
 renewable and net-load targets, Optuna, SHAP, MLflow Model Registry, and idempotent predictions.
-Milestone 4 adds a production-quality three-layer anomaly and alerting workflow while preserving
-all earlier interfaces.
+Milestone 4 adds a production-quality three-layer anomaly and alerting workflow. Milestone 5 adds
+forecast-aligned battery dispatch optimization and rolling decision-support simulation while
+preserving all earlier interfaces.
 
-GridMind still deliberately contains **no battery optimization, online API, dashboard, Kafka,
-Kubernetes, cloud infrastructure, deep-learning anomaly model, or LLM assistant**.
+GridMind still deliberately contains **no physical battery control, SCADA integration, online
+API, dashboard, Kafka, Kubernetes, cloud infrastructure, or live dispatch commands**.
 
 ## Architecture
 
@@ -36,6 +37,9 @@ flowchart LR
     Residuals --> Ensemble
     IF --> Ensemble
     Ensemble --> Alerts["Deduplicated alert lifecycle"]
+    Forecasts --> BatteryMILP["HiGHS battery dispatch MILP"]
+    BatteryMILP --> Dispatch["Validated dispatch schedules"]
+    Dispatch --> Rolling["Leakage-safe rolling simulation"]
 ```
 
 The modules are intentionally cohesive: `data` owns API communication, contracts,
@@ -56,6 +60,7 @@ src/gridmind/          Python package
   explainability/      SHAP importance, plots, and local explanations
   anomalies/           Rules, residuals, IsolationForest, ensemble, severity, evaluation
   alerts/              Alert contracts, lifecycle, DuckDB persistence
+  optimization/        Battery physics, HiGHS MILP, baselines, simulation, metrics, storage
   pipelines/           Ingest, baseline, train, predict, and explain orchestration
 tests/                 Offline unit and integration tests
 data/raw/              Ignored raw API snapshots
@@ -116,6 +121,16 @@ Register for an [EIA API key](https://www.eia.gov/opendata/register.php), then s
 | `SOLAR_MIN_DROP_DURATION_HOURS` | Consecutive daylight underproduction required | `2` |
 | `ALERT_DEDUP_WINDOW_HOURS` / `ALERT_AUTO_RESOLVE_HOURS` | Alert lifecycle windows | `6` / `24` |
 | `ANOMALY_EXPERIMENT_NAME` | MLflow anomaly experiment | `gridmind-anomaly-detection` |
+| `BATTERY_CAPACITY_MWH` / `BATTERY_MAX_*_MW` | Illustrative energy and charge/discharge limits | `500` / `100` |
+| `BATTERY_MIN_SOC_MWH` / `BATTERY_MAX_SOC_MWH` | Allowed stored-energy interval | `50` / `500` |
+| `BATTERY_INITIAL_SOC_MWH` / `BATTERY_TERMINAL_SOC_MWH` | Horizon boundary SOC | `250` / `250` |
+| `BATTERY_*_EFFICIENCY` / `BATTERY_SELF_DISCHARGE_PER_HOUR` | Simplified battery physics | `0.95` / `0.0001` |
+| `BATTERY_MAX_EQUIVALENT_CYCLES_PER_DAY` | Per-UTC-day throughput limit | `1.5` |
+| `DISPATCH_HORIZON_HOURS` / `DISPATCH_STEP_HOURS` | Optimization horizon and interval | `24` / `1` |
+| `FALLBACK_ENERGY_PRICE_PER_MWH` | Explicit flat tariff if price data are unavailable | none |
+| `ROBUST_DEMAND_UPLIFT_PCT` / `ROBUST_RENEWABLE_REDUCTION_PCT` | Conservative deterministic margins | `0.03` / `0.10` |
+| `ROBUST_EXTRA_RESERVE_PCT` | Additional conservative SOC reserve | `0.05` |
+| `BATTERY_EXPERIMENT_NAME` | MLflow dispatch/backtest experiment | `gridmind-battery-optimization` |
 
 `ENABLE_MLFLOW` is the Milestone 2 spelling; legacy `MLFLOW_ENABLED` remains supported. Milestone
 2 defaults to SQLite because experiment hierarchy, logged models, Registry versions, and
@@ -503,7 +518,91 @@ never logged.
 **Synthetic anomaly labels are controlled test cases, not real incidents. Unsupervised anomaly
 scores do not prove a grid or system failure. Human review is required before operational action.**
 Synthetic-injection metrics must not be presented as performance on real labelled incidents.
-Online email/Slack/SMS delivery and battery optimization are not included.
+Online email/Slack/SMS delivery is not included.
+
+## Milestone 5: battery dispatch decision support
+
+Milestone 5 converts aligned demand, solar, wind, renewable, and net-load forecasts into a
+simulated battery schedule. It never communicates with a battery, inverter, EMS, SCADA system,
+or market. Battery parameters in `.env.example` are illustrative unless an operator supplies and
+validates them.
+
+```mermaid
+flowchart LR
+    TF["Same-origin target forecasts"] --> Align["UTC horizon and lineage validation"]
+    Price["Hourly prices or explicit fallback tariff"] --> Align
+    Align --> Robust["Optional deterministic safety margins"]
+    Robust --> MILP["SciPy milp / bundled HiGHS"]
+    Spec["Battery specification"] --> MILP
+    MILP --> Physics["Post-solve SOC, power, reserve, cycle validation"]
+    Physics --> Duck["DuckDB dispatch runs and points"]
+    Physics --> Artifacts["Schedule, SOC, objective, diagnostics"]
+    Physics --> Roll["Apply first action and carry realized SOC"]
+    Roll --> Reopt["Next available forecast origin"]
+    Reopt --> MILP
+```
+
+### Battery model and MILP
+
+For interval duration `dt`, GridMind enforces:
+
+```text
+soc_end = soc_start * (1 - self_discharge_rate)^dt
+          + charge_mw * charge_efficiency * dt
+          - discharge_mw / discharge_efficiency * dt
+```
+
+Charge and discharge are non-negative, and `net_battery_power_mw = discharge_mw - charge_mw`.
+Binary variables prevent simultaneous charging and discharging. Linear constraints enforce power,
+minimum/maximum/reserve SOC, initial and terminal SOC, chronological continuity, and maximum
+equivalent cycles for each UTC day. Solver output is not clipped: any tolerance-exceeding physics
+violation fails the workflow.
+
+The supported objectives are `peak_shaving`, `energy_arbitrage`, `renewable_utilization`, and
+`balanced`. Peak shaving uses an explicit horizon-peak variable. Arbitrage requires supplied
+hourly prices or the explicitly configured fallback tariff. Renewable utilization rewards
+renewable-aligned charging; it does **not** claim curtailment reduction because this milestone does
+not model a curtailment/export limit. Balanced mode uses configured normalized weights, and every
+objective contribution is stored separately. Degradation is a simplified linear throughput cost.
+
+### Rolling evaluation, baselines, and robustness
+
+Rolling simulation optimizes a full horizon, applies only its first action, carries the resulting
+SOC, advances to the next contiguous forecast origin, and re-optimizes. `forecast_based` mode uses
+only predictions available at each origin. `oracle` mode replaces forecast inputs with explicitly
+supplied future actuals and is an upper-bound research comparison that is **not deployable**.
+Missing origins, timestamp gaps, incomplete horizons, and incompatible model lineage fail clearly.
+
+The no-battery baseline uses zero power. The deterministic rule baseline charges at forecast-known
+low-load or renewable-surplus periods and discharges above the forecast-known high-load threshold,
+while observing physical limits. Optional `--robust` mode transparently applies demand uplift,
+renewable reduction, and additional reserve margins while retaining original values in metadata.
+These are conservative deterministic adjustments, not probabilistic optimization.
+
+```bash
+gridmind optimize-dispatch --region PJM --battery-id pjm-bess-1 \
+  --forecast-origin 2026-07-13T03:00:00Z --horizon 24 \
+  --objective peak_shaving --model-alias champion --no-mlflow
+
+gridmind battery-backtest --region PJM --battery-id pjm-bess-1 \
+  --start-date 2025-12-01 --end-date 2025-12-31 \
+  --objective balanced --mode forecast_based --fallback-energy-price 50 --no-mlflow
+
+gridmind dispatches --region PJM --battery-id pjm-bess-1 --start-date 2026-07-01
+```
+
+`battery_dispatch_runs` and `battery_dispatch_points` use deterministic run identifiers, UTC
+timestamps, configuration JSON, and forecast/model lineage JSON. `battery_backtest_runs` and
+`battery_backtest_metrics` store idempotent strategy comparisons. Artifacts live under
+`artifacts/battery_dispatch/<run-id>/` and `artifacts/battery_backtests/<run-id>/`. When enabled,
+the `gridmind-battery-optimization` MLflow experiment records the specification, weights, solver
+diagnostics, safety margins, metrics, schedule, SOC trajectory, lineage, Git revision, and package
+versions without logging secrets or `.env` contents.
+
+This system does not control a physical battery. Results are decision-support simulations, not
+guaranteed savings or dispatch instructions. Oracle results are non-deployable. Market settlement,
+network power flow, interconnection, telemetry latency, ancillary services, regulatory rules, and
+detailed electrochemical degradation are not fully modelled.
 
 ## Testing and quality
 
@@ -574,8 +673,9 @@ not distributed concurrent writers. MASE currently uses first-difference actuals
 evaluated sample as its scaling series. No negative-output clamp is enabled; invalid model
 output fails explicitly.
 
-Milestones 1–4 now cover ingestion, deterministic and ML forecasting, weather/renewable/net-load
-targets, anomaly detection, and local alert lifecycle management. Future work may add
-probabilistic forecasts and calibrated real-incident evaluation, followed by battery-dispatch
-optimization. Online delivery, serving, dashboards, and cloud infrastructure remain later work
-and should be added only with explicit reliability and operational requirements.
+Milestones 1–5 now cover ingestion, deterministic and ML forecasting, weather/renewable/net-load
+targets, anomaly detection, local alert lifecycle management, and simulated battery dispatch.
+Future work may add probabilistic forecasts, calibrated real-incident evaluation, richer market
+and network constraints, and operator-supplied asset models. Physical control, online delivery,
+serving, dashboards, and cloud infrastructure remain out of scope until explicit safety,
+reliability, regulatory, and operational requirements exist.

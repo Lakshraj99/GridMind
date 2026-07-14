@@ -23,12 +23,15 @@ from gridmind.data.storage import (
 )
 from gridmind.exceptions import GridMindError, StorageError
 from gridmind.logging_config import configure_logging
+from gridmind.optimization.storage import BatteryDispatchStorage
 from gridmind.pipelines.backtest_anomalies import run_anomaly_backtest
+from gridmind.pipelines.backtest_dispatch import run_battery_backtest
 from gridmind.pipelines.baseline import run_baseline_pipeline
 from gridmind.pipelines.detect_anomalies import run_anomaly_detection
 from gridmind.pipelines.explain import run_explain_pipeline
 from gridmind.pipelines.ingest import run_ingestion
 from gridmind.pipelines.manage_alerts import list_alerts, update_alert_status
+from gridmind.pipelines.optimize_dispatch import run_dispatch_optimization
 from gridmind.pipelines.predict import run_prediction_pipeline
 from gridmind.pipelines.predict_target import run_target_prediction
 from gridmind.pipelines.renewable_ingest import run_renewable_ingestion
@@ -62,6 +65,18 @@ class AlertStatusOption(StrEnum):
     acknowledged = "acknowledged"
     resolved = "resolved"
     suppressed = "suppressed"
+
+
+class DispatchObjectiveOption(StrEnum):
+    peak_shaving = "peak_shaving"
+    energy_arbitrage = "energy_arbitrage"
+    renewable_utilization = "renewable_utilization"
+    balanced = "balanced"
+
+
+class SimulationModeOption(StrEnum):
+    forecast_based = "forecast_based"
+    oracle = "oracle"
 
 
 @app.callback()
@@ -652,6 +667,158 @@ def alert_update_command(
         typer.echo(f"Alert update failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(f"Updated alert {alert['alert_id']} to {alert['status']}.")
+
+
+@app.command("optimize-dispatch")
+def optimize_dispatch_command(
+    region: Annotated[str, typer.Option(help="Grid region.")],
+    battery_id: Annotated[str, typer.Option(help="Operator battery identifier.")],
+    forecast_origin: Annotated[str, typer.Option(help="Exact UTC target-forecast origin.")],
+    horizon: Annotated[int, typer.Option(min=1)] = 24,
+    objective: Annotated[
+        DispatchObjectiveOption, typer.Option(help="Battery optimization objective.")
+    ] = DispatchObjectiveOption.peak_shaving,
+    model_alias: Annotated[str, typer.Option(help="Forecast Registry alias lineage.")] = "champion",
+    robust: Annotated[bool, typer.Option("--robust/--no-robust")] = False,
+    fallback_energy_price: Annotated[
+        float | None,
+        typer.Option(min=0, help="Explicit flat tariff per MWh when hourly prices are absent."),
+    ] = None,
+    mlflow_enabled: Annotated[bool, typer.Option("--mlflow/--no-mlflow")] = True,
+) -> None:
+    """Optimize one forecast horizon; this never controls physical equipment."""
+    try:
+        settings = get_settings()
+        if fallback_energy_price is not None:
+            settings = settings.model_copy(
+                update={"fallback_energy_price_per_mwh": fallback_energy_price}
+            )
+        result = run_dispatch_optimization(
+            settings,
+            region=region,
+            battery_id=battery_id,
+            forecast_origin=forecast_origin,
+            horizon=horizon,
+            objective_mode=objective.value,
+            model_alias=model_alias,
+            robust=robust,
+            mlflow_enabled=mlflow_enabled,
+        )
+    except (GridMindError, MlflowException, OSError, ValueError, RuntimeError) as exc:
+        typer.echo(f"Battery dispatch optimization failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    schedule = result.optimization.schedule
+    metrics = result.metrics
+    typer.echo(f"Forecast origin: {format_utc_timestamp(schedule['forecast_origin'].iloc[0])}")
+    typer.echo(f"Battery: {result.battery.battery_id} ({result.battery.capacity_mwh:g} MWh)")
+    typer.echo(f"Solver status: {result.optimization.diagnostics.status}")
+    typer.echo(f"Objective value: {result.optimization.diagnostics.objective_value}")
+    typer.echo(f"Peak before: {metrics['original_peak_load_mw']:.3f} MW")
+    typer.echo(f"Peak after: {metrics['optimized_peak_load_mw']:.3f} MW")
+    typer.echo(f"Peak reduction: {metrics['absolute_peak_reduction_mw']:.3f} MW")
+    typer.echo(f"Charge energy: {metrics['charge_energy_mwh']:.3f} MWh")
+    typer.echo(f"Discharge energy: {metrics['discharge_energy_mwh']:.3f} MWh")
+    typer.echo(f"Terminal SOC: {schedule['soc_end_mwh'].iloc[-1]:.3f} MWh")
+    typer.echo(f"Artifacts: {result.artifact_dir}")
+    typer.echo(f"DuckDB dispatch-point rows: {result.duckdb_rows:,}")
+    typer.echo("Decision-support simulation only; no physical battery commands were issued.")
+
+
+@app.command("battery-backtest")
+def battery_backtest_command(
+    region: Annotated[str, typer.Option(help="Grid region.")],
+    battery_id: Annotated[str, typer.Option(help="Operator battery identifier.")],
+    start_date: Annotated[str, typer.Option(help="First UTC forecast origin.")],
+    end_date: Annotated[str, typer.Option(help="Last UTC forecast origin.")],
+    objective: Annotated[
+        DispatchObjectiveOption, typer.Option(help="Battery optimization objective.")
+    ] = DispatchObjectiveOption.balanced,
+    mode: Annotated[
+        SimulationModeOption, typer.Option(help="Forecast-based or non-deployable oracle mode.")
+    ] = SimulationModeOption.forecast_based,
+    horizon: Annotated[int, typer.Option(min=1)] = 24,
+    model_alias: Annotated[str, typer.Option(help="Forecast Registry alias lineage.")] = "champion",
+    fallback_energy_price: Annotated[
+        float | None,
+        typer.Option(min=0, help="Explicit flat tariff per MWh when hourly prices are absent."),
+    ] = None,
+    mlflow_enabled: Annotated[bool, typer.Option("--mlflow/--no-mlflow")] = True,
+) -> None:
+    """Backtest rolling dispatch without sending commands to a battery."""
+    try:
+        settings = get_settings()
+        if fallback_energy_price is not None:
+            settings = settings.model_copy(
+                update={"fallback_energy_price_per_mwh": fallback_energy_price}
+            )
+        result = run_battery_backtest(
+            settings,
+            region=region,
+            battery_id=battery_id,
+            start_date=start_date,
+            end_date=end_date,
+            objective_mode=objective.value,
+            mode=mode.value,
+            horizon=horizon,
+            model_alias=model_alias,
+            mlflow_enabled=mlflow_enabled,
+        )
+    except (GridMindError, MlflowException, OSError, ValueError, RuntimeError) as exc:
+        typer.echo(f"Battery backtest failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    optimized_name = (
+        "optimized_oracle_non_deployable"
+        if mode is SimulationModeOption.oracle
+        else "optimized_forecast_based"
+    )
+    metrics = result.strategy_comparison.set_index("strategy").loc[optimized_name]
+    metric_values = metrics.to_dict()
+    typer.echo(f"Evaluated horizons: {result.rolling.successful_optimizations}")
+    typer.echo(f"Successful optimizations: {result.rolling.successful_optimizations}")
+    typer.echo(f"Solver failures: {result.rolling.solver_failures}")
+    typer.echo(f"Peak reduction: {metrics['absolute_peak_reduction_mw']:.3f} MW")
+    typer.echo(f"Cost savings: {metrics['energy_cost_savings']:.3f}")
+    typer.echo(f"Equivalent cycles: {metrics['equivalent_full_cycles']:.6f}")
+    typer.echo(
+        f"Violations: SOC={int(metric_values['soc_violations'])}, "
+        f"power={int(metric_values['power_violations'])}"
+    )
+    typer.echo(f"Artifacts: {result.artifact_dir}")
+    typer.echo(f"MLflow run ID: {result.mlflow_run_id or 'disabled'}")
+    if mode is SimulationModeOption.oracle:
+        typer.echo("Oracle results use future actuals and are non-deployable.", err=True)
+
+
+@app.command("dispatches")
+def list_dispatches_command(
+    region: Annotated[str | None, typer.Option(help="Optional grid region.")] = None,
+    battery_id: Annotated[str | None, typer.Option(help="Optional battery identifier.")] = None,
+    objective: Annotated[
+        DispatchObjectiveOption | None, typer.Option(help="Optional objective mode.")
+    ] = None,
+    solver_status: Annotated[str | None, typer.Option(help="Optional solver status.")] = None,
+    forecast_origin: Annotated[str | None, typer.Option(help="Optional exact UTC origin.")] = None,
+    start_date: Annotated[str | None, typer.Option(help="Optional UTC start origin.")] = None,
+    end_date: Annotated[str | None, typer.Option(help="Optional UTC end origin.")] = None,
+    csv_path: Annotated[
+        Path | None, typer.Option("--csv", help="Optional CSV output path.")
+    ] = None,
+) -> None:
+    """List persisted battery dispatch runs with UTC-safe filtering."""
+    try:
+        frame = BatteryDispatchStorage(get_settings().duckdb_path).read_dispatches(
+            region=region,
+            battery_id=battery_id,
+            objective_mode=objective.value if objective else None,
+            solver_status=solver_status,
+            forecast_origin=forecast_origin,
+            start=start_date,
+            end=end_date,
+        )
+        _write_or_display(frame, csv_path, ("forecast_origin", "created_at_utc"))
+    except (GridMindError, OSError, ValueError, RuntimeError) as exc:
+        typer.echo(f"Dispatch listing failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 def _write_or_display(

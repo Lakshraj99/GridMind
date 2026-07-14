@@ -152,6 +152,59 @@ class Settings(BaseSettings):
     anomaly_experiment_name: str = Field(
         default="gridmind-anomaly-detection", alias="ANOMALY_EXPERIMENT_NAME"
     )
+    battery_optimization_enabled: bool = Field(default=True, alias="BATTERY_OPTIMIZATION_ENABLED")
+    battery_capacity_mwh: float = Field(default=500.0, gt=0.0, alias="BATTERY_CAPACITY_MWH")
+    battery_max_charge_mw: float = Field(default=100.0, gt=0.0, alias="BATTERY_MAX_CHARGE_MW")
+    battery_max_discharge_mw: float = Field(default=100.0, gt=0.0, alias="BATTERY_MAX_DISCHARGE_MW")
+    battery_min_soc_mwh: float = Field(default=50.0, ge=0.0, alias="BATTERY_MIN_SOC_MWH")
+    battery_max_soc_mwh: float = Field(default=500.0, gt=0.0, alias="BATTERY_MAX_SOC_MWH")
+    battery_initial_soc_mwh: float = Field(default=250.0, ge=0.0, alias="BATTERY_INITIAL_SOC_MWH")
+    battery_terminal_soc_mwh: float = Field(default=250.0, ge=0.0, alias="BATTERY_TERMINAL_SOC_MWH")
+    battery_charge_efficiency: float = Field(
+        default=0.95, gt=0.0, le=1.0, alias="BATTERY_CHARGE_EFFICIENCY"
+    )
+    battery_discharge_efficiency: float = Field(
+        default=0.95, gt=0.0, le=1.0, alias="BATTERY_DISCHARGE_EFFICIENCY"
+    )
+    battery_self_discharge_per_hour: float = Field(
+        default=0.0001, ge=0.0, lt=1.0, alias="BATTERY_SELF_DISCHARGE_PER_HOUR"
+    )
+    battery_max_equivalent_cycles_per_day: float = Field(
+        default=1.5, gt=0.0, alias="BATTERY_MAX_EQUIVALENT_CYCLES_PER_DAY"
+    )
+    battery_degradation_cost_per_mwh: float = Field(
+        default=5.0, ge=0.0, alias="BATTERY_DEGRADATION_COST_PER_MWH"
+    )
+    battery_reserve_soc_pct: float = Field(
+        default=0.10, ge=0.0, lt=1.0, alias="BATTERY_RESERVE_SOC_PCT"
+    )
+    dispatch_horizon_hours: int = Field(default=24, gt=0, alias="DISPATCH_HORIZON_HOURS")
+    dispatch_step_hours: float = Field(default=1.0, gt=0.0, alias="DISPATCH_STEP_HOURS")
+    dispatch_solver_timeout_seconds: float = Field(
+        default=60.0, gt=0.0, alias="DISPATCH_SOLVER_TIMEOUT_SECONDS"
+    )
+    peak_shaving_weight: float = Field(default=1.0, ge=0.0, alias="PEAK_SHAVING_WEIGHT")
+    energy_cost_weight: float = Field(default=1.0, ge=0.0, alias="ENERGY_COST_WEIGHT")
+    renewable_utilization_weight: float = Field(
+        default=0.5, ge=0.0, alias="RENEWABLE_UTILIZATION_WEIGHT"
+    )
+    degradation_weight: float = Field(default=1.0, ge=0.0, alias="DEGRADATION_WEIGHT")
+    terminal_soc_penalty_weight: float = Field(
+        default=10.0, ge=0.0, alias="TERMINAL_SOC_PENALTY_WEIGHT"
+    )
+    fallback_energy_price_per_mwh: float | None = Field(
+        default=None, ge=0.0, alias="FALLBACK_ENERGY_PRICE_PER_MWH"
+    )
+    robust_demand_uplift_pct: float = Field(default=0.03, ge=0.0, alias="ROBUST_DEMAND_UPLIFT_PCT")
+    robust_renewable_reduction_pct: float = Field(
+        default=0.10, ge=0.0, le=1.0, alias="ROBUST_RENEWABLE_REDUCTION_PCT"
+    )
+    robust_extra_reserve_pct: float = Field(
+        default=0.05, ge=0.0, lt=1.0, alias="ROBUST_EXTRA_RESERVE_PCT"
+    )
+    battery_experiment_name: str = Field(
+        default="gridmind-battery-optimization", alias="BATTERY_EXPERIMENT_NAME"
+    )
 
     @field_validator("weather_lags", "weather_rolling_windows", mode="before")
     @classmethod
@@ -205,6 +258,18 @@ class Settings(BaseSettings):
             raise ValueError(
                 "ISOLATION_EXTREME_SCORE_QUANTILE must exceed every target score quantile."
             )
+        if self.battery_min_soc_mwh >= self.battery_max_soc_mwh:
+            raise ValueError("BATTERY_MIN_SOC_MWH must be below BATTERY_MAX_SOC_MWH.")
+        if self.battery_max_soc_mwh > self.battery_capacity_mwh:
+            raise ValueError("BATTERY_MAX_SOC_MWH must not exceed BATTERY_CAPACITY_MWH.")
+        for name, value in (
+            ("BATTERY_INITIAL_SOC_MWH", self.battery_initial_soc_mwh),
+            ("BATTERY_TERMINAL_SOC_MWH", self.battery_terminal_soc_mwh),
+        ):
+            if not self.battery_min_soc_mwh <= value <= self.battery_max_soc_mwh:
+                raise ValueError(f"{name} must be within configured SOC bounds.")
+        if self.battery_reserve_soc_pct * self.battery_capacity_mwh > self.battery_max_soc_mwh:
+            raise ValueError("BATTERY_RESERVE_SOC_PCT exceeds the maximum SOC.")
         return self
 
     def require_eia_api_key(self) -> str:
