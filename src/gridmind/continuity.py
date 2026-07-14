@@ -8,7 +8,7 @@ from typing import Any
 import pandas as pd
 
 from gridmind.exceptions import FeatureEngineeringError, InsufficientHistoryError
-from gridmind.time_utils import format_utc_timestamp
+from gridmind.time_utils import format_utc_timestamp, to_utc_timestamp
 
 HOUR = pd.Timedelta(hours=1)
 
@@ -122,8 +122,8 @@ def detect_contiguous_segments(frame: pd.DataFrame) -> ContinuityResult:
     for (region, segment_id), group in annotated.groupby(
         ["region", "region_segment_id"], sort=True, observed=True
     ):
-        start = pd.Timestamp(group["timestamp_utc"].iloc[0])
-        end = pd.Timestamp(group["timestamp_utc"].iloc[-1])
+        start = to_utc_timestamp(group["timestamp_utc"].iloc[0])
+        end = to_utc_timestamp(group["timestamp_utc"].iloc[-1])
         prior = previous_end.get(str(region))
         gap_before = float((start - prior) / HOUR) if prior is not None else 0.0
         missing_hours = max(int(gap_before) - 1, 0) if gap_before > 1 else 0
@@ -173,14 +173,14 @@ def select_gap_aware_windows(
     }
     maximums = annotated.groupby("region", observed=True)["timestamp_utc"].max()
     minimums = annotated.groupby("region", observed=True)["timestamp_utc"].min()
-    cursor = pd.Timestamp(maximums.min()) - pd.Timedelta(hours=horizon)
-    earliest = pd.Timestamp(minimums.max()) + pd.Timedelta(hours=required_history - 1)
+    cursor = to_utc_timestamp(maximums.min()) - pd.Timedelta(hours=horizon)
+    earliest = to_utc_timestamp(minimums.max()) + pd.Timedelta(hours=required_history - 1)
     accepted_descending: list[SelectedWindow] = []
     candidates: list[dict[str, Any]] = []
 
     while cursor >= earliest and len(accepted_descending) < windows:
-        validation = pd.date_range(cursor + HOUR, periods=horizon, freq="h")
-        history = pd.date_range(end=cursor, periods=required_history, freq="h")
+        validation = pd.date_range(cursor + HOUR, periods=horizon, freq="h", tz="UTC")
+        history = pd.date_range(end=cursor, periods=required_history, freq="h", tz="UTC")
         reasons: list[str] = []
         segments: dict[str, str] = {}
         for region in regions:

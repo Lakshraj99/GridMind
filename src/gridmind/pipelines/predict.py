@@ -20,7 +20,7 @@ from gridmind.exceptions import (
 )
 from gridmind.models.promotion import effective_registry_uri
 from gridmind.models.serialization import ModelBundle, load_model_bundle
-from gridmind.time_utils import format_utc_timestamp
+from gridmind.time_utils import format_utc_timestamp, to_utc_timestamp
 
 
 @dataclass(frozen=True)
@@ -83,7 +83,7 @@ def run_prediction_pipeline(
     )
     predictions = validate_batch_predictions(predictions)
     output_dir.mkdir(parents=True, exist_ok=True)
-    origin = pd.Timestamp(predictions["forecast_origin"].iloc[0]).strftime("%Y%m%dT%H%M%SZ")
+    origin = to_utc_timestamp(predictions["forecast_origin"].iloc[0]).strftime("%Y%m%dT%H%M%SZ")
     parquet_path = output_dir / f"demand_forecast_{region}_{origin}.parquet"
     predictions.to_parquet(parquet_path, index=False)
     count = DuckDBStorage(settings.duckdb_path).upsert_forecasts(predictions)

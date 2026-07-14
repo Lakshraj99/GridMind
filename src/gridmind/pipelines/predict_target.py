@@ -51,12 +51,20 @@ def run_target_prediction(
     )
     if forecast_weather.empty:
         raise ValueError("Target prediction requires provider forecast weather; none is stored.")
+    history["timestamp_utc"] = pd.to_datetime(history["timestamp_utc"], utc=True, errors="raise")
+    forecast_weather["timestamp_utc"] = pd.to_datetime(
+        forecast_weather["timestamp_utc"], utc=True, errors="raise"
+    )
     weather_features = build_weather_features(
         forecast_weather,
         mode=weather_mode,
         lags=settings.weather_lags,
         rolling_windows=settings.weather_rolling_windows,
+        drop_incomplete_history=False,
     ).frame
+    weather_features["timestamp_utc"] = pd.to_datetime(
+        weather_features["timestamp_utc"], utc=True, errors="raise"
+    )
     prediction_input = history.merge(
         weather_features,
         on=["region", "timestamp_utc"],

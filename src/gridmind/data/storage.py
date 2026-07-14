@@ -11,10 +11,10 @@ from typing import Any
 from urllib.parse import unquote
 from uuid import uuid4
 
-import duckdb
 import pandas as pd
 import pyarrow as pa
 
+from gridmind.data.duckdb_connection import connect_duckdb
 from gridmind.data.processing import CANONICAL_COLUMNS
 from gridmind.exceptions import StorageError
 from gridmind.logging_config import redact_sensitive_value
@@ -233,10 +233,11 @@ class DuckDBStorage:
 
     def upsert(self, frame: pd.DataFrame) -> int:
         """Replace existing region/timestamp keys and return the resulting row count."""
-        with duckdb.connect(str(self.path)) as connection:
+        incoming = _canonicalize_processed_frame(frame)
+        with connect_duckdb(self.path) as connection:
             connection.execute("BEGIN TRANSACTION")
             try:
-                connection.register("incoming_grid_data", frame[CANONICAL_COLUMNS])
+                connection.register("incoming_grid_data", incoming)
                 connection.execute(
                     f"""
                     CREATE TABLE IF NOT EXISTS {self.table_name} AS
@@ -270,7 +271,7 @@ class DuckDBStorage:
         self, region: str, start_date: str | datetime, end_date: str | datetime
     ) -> pd.DataFrame:
         """Read one region and inclusive date range using bound SQL parameters."""
-        with duckdb.connect(str(self.path), read_only=True) as connection:
+        with connect_duckdb(self.path, read_only=True) as connection:
             frame = connection.execute(
                 f"""
                 SELECT * FROM {self.table_name}
@@ -301,7 +302,7 @@ class DuckDBStorage:
             placeholders = ", ".join("?" for _ in regions)
             region_clause = f" AND region IN ({placeholders})"
             parameters.extend(regions)
-        with duckdb.connect(str(self.path), read_only=True) as connection:
+        with connect_duckdb(self.path, read_only=True) as connection:
             frame = connection.execute(
                 f"""
                 SELECT * FROM {self.table_name}
@@ -320,7 +321,7 @@ class DuckDBStorage:
 
     def inspect(self) -> dict[str, Any]:
         """Return compact table statistics for CLI inspection."""
-        with duckdb.connect(str(self.path), read_only=True) as connection:
+        with connect_duckdb(self.path, read_only=True) as connection:
             row = connection.execute(
                 f"""
                 SELECT COUNT(*), MIN(timestamp_utc), MAX(timestamp_utc),
@@ -351,10 +352,13 @@ class DuckDBStorage:
         missing = set(FORECAST_COLUMNS).difference(frame.columns)
         if missing:
             raise ValueError(f"Forecast data is missing columns: {sorted(missing)}")
-        with duckdb.connect(str(self.path)) as connection:
+        incoming = frame[FORECAST_COLUMNS].copy()
+        for column in ("forecast_origin", "timestamp_utc", "created_at_utc"):
+            incoming[column] = pd.to_datetime(incoming[column], utc=True, errors="raise")
+        with connect_duckdb(self.path) as connection:
             connection.execute("BEGIN TRANSACTION")
             try:
-                connection.register("incoming_forecasts", frame[FORECAST_COLUMNS])
+                connection.register("incoming_forecasts", incoming)
                 connection.execute(
                     f"""
                     CREATE TABLE IF NOT EXISTS {self.forecast_table_name} AS
@@ -391,7 +395,7 @@ class DuckDBStorage:
 
     def read_forecasts(self, region: str | None = None) -> pd.DataFrame:
         """Read persisted forecasts, optionally filtering one region."""
-        with duckdb.connect(str(self.path), read_only=True) as connection:
+        with connect_duckdb(self.path, read_only=True) as connection:
             if region is None:
                 frame = connection.execute(
                     f"SELECT * FROM {self.forecast_table_name} "

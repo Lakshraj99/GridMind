@@ -16,6 +16,7 @@ from gridmind.continuity import WindowSelection, select_gap_aware_windows
 from gridmind.features.builder import FeatureBuilder
 from gridmind.features.contracts import FeatureSpecification
 from gridmind.models.factories import create_model
+from gridmind.time_utils import to_utc_timestamp
 from gridmind.training.datasets import reserve_final_evaluation_history
 from gridmind.training.evaluator import evaluate_model
 
@@ -72,7 +73,7 @@ def tune_model(
     )
     if tuning_history.empty:
         raise ValueError("No older history remains after reserving final evaluation windows.")
-    tuning_end = pd.Timestamp(tuning_history["timestamp_utc"].max())
+    tuning_end = to_utc_timestamp(tuning_history["timestamp_utc"].max())
     tuning_selection = tuning_window_selection or select_gap_aware_windows(
         tuning_history,
         horizon=final_horizon,

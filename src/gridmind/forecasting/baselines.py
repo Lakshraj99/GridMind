@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 import pandas as pd
 
 from gridmind.exceptions import InsufficientHistoryError
+from gridmind.time_utils import to_utc_timestamp
 
 FORECAST_COLUMNS = [
     "timestamp_utc",
@@ -34,11 +35,14 @@ class BaselineForecaster(ABC):
         if history.empty:
             raise InsufficientHistoryError("At least one historical observation is required.")
         ordered = history.sort_values("timestamp_utc").copy()
+        ordered["timestamp_utc"] = pd.to_datetime(
+            ordered["timestamp_utc"], utc=True, errors="raise"
+        )
         if ordered["region"].nunique() != 1:
             raise ValueError("A forecast history must contain exactly one region.")
         if ordered.duplicated("timestamp_utc").any():
             raise ValueError("Forecast history contains duplicate timestamps.")
-        origin = pd.Timestamp(ordered["timestamp_utc"].iloc[-1])
+        origin = to_utc_timestamp(ordered["timestamp_utc"].iloc[-1])
         return ordered, str(ordered["region"].iloc[0]), origin
 
     def _result(
@@ -67,7 +71,9 @@ class LastValueForecaster(BaselineForecaster):
 
     def predict(self, history: pd.DataFrame, horizon: int = 24) -> pd.DataFrame:
         ordered, region, origin = self._prepare(history, horizon)
-        timestamps = pd.date_range(origin + pd.Timedelta(hours=1), periods=horizon, freq="h")
+        timestamps = pd.date_range(
+            origin + pd.Timedelta(hours=1), periods=horizon, freq="h", tz="UTC"
+        )
         value = float(ordered["demand_mw"].iloc[-1])
         return self._result(timestamps, region, [value] * horizon, origin)
 
@@ -88,9 +94,11 @@ class SeasonalNaiveForecaster(BaselineForecaster):
                 f"Model {self.name} requires at least {self.lag} hourly observations; "
                 f"received {len(ordered)}."
             )
-        timestamps = pd.date_range(origin + pd.Timedelta(hours=1), periods=horizon, freq="h")
+        timestamps = pd.date_range(
+            origin + pd.Timedelta(hours=1), periods=horizon, freq="h", tz="UTC"
+        )
         known = {
-            pd.Timestamp(timestamp): float(value)
+            to_utc_timestamp(timestamp): float(value)
             for timestamp, value in zip(ordered["timestamp_utc"], ordered["demand_mw"], strict=True)
         }
         predictions: list[float] = []

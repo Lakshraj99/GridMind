@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import duckdb
 import pandas as pd
 
+from gridmind.data.duckdb_connection import connect_duckdb
 from gridmind.renewables.schemas import RENEWABLE_COLUMNS
 
 
@@ -31,8 +31,11 @@ class RenewableStorage:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def upsert(self, frame: pd.DataFrame) -> int:
-        with duckdb.connect(str(self.path)) as connection:
-            connection.register("incoming_renewable", frame[RENEWABLE_COLUMNS])
+        incoming = frame[RENEWABLE_COLUMNS].copy()
+        for column in ("timestamp_utc", "ingestion_timestamp_utc"):
+            incoming[column] = pd.to_datetime(incoming[column], utc=True, errors="raise")
+        with connect_duckdb(self.path) as connection:
+            connection.register("incoming_renewable", incoming)
             connection.execute(
                 f"CREATE TABLE IF NOT EXISTS {self.table_name} AS "
                 "SELECT * FROM incoming_renewable WHERE FALSE"
@@ -47,7 +50,7 @@ class RenewableStorage:
         return int(row[0]) if row else 0
 
     def read(self, region: str) -> pd.DataFrame:
-        with duckdb.connect(str(self.path), read_only=True) as connection:
+        with connect_duckdb(self.path, read_only=True) as connection:
             frame = connection.execute(
                 f"SELECT * FROM {self.table_name} WHERE region = ? ORDER BY timestamp_utc",
                 [region],
@@ -60,7 +63,7 @@ class RenewableStorage:
 
 def create_net_load_view(path: Path | str) -> None:
     """Create a documented complete-case net-load view without filling missing inputs."""
-    with duckdb.connect(str(path)) as connection:
+    with connect_duckdb(path) as connection:
         tables = {
             row[0]
             for row in connection.execute(

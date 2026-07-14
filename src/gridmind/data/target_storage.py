@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import duckdb
 import numpy as np
 import pandas as pd
 
+from gridmind.data.duckdb_connection import connect_duckdb
 from gridmind.exceptions import TargetForecastError
 from gridmind.models.target_factory import TARGET_FORECAST_COLUMNS
 from gridmind.renewables.targets import SUPPORTED_TARGETS
@@ -57,7 +57,7 @@ class TargetForecastStorage:
             "weather_mode",
         ]
         predicate = " AND ".join(f"source.{key} = target.{key}" for key in keys)
-        with duckdb.connect(str(self.path)) as connection:
+        with connect_duckdb(self.path) as connection:
             connection.register("incoming_target_forecasts", valid)
             connection.execute(
                 f"CREATE TABLE IF NOT EXISTS {self.table_name} AS "
@@ -74,7 +74,7 @@ class TargetForecastStorage:
         return int(row[0]) if row else 0
 
     def read(self, *, target: str | None = None) -> pd.DataFrame:
-        with duckdb.connect(str(self.path), read_only=True) as connection:
+        with connect_duckdb(self.path, read_only=True) as connection:
             if target is None:
                 frame = connection.execute(
                     f"SELECT * FROM {self.table_name} ORDER BY target, region, timestamp_utc"

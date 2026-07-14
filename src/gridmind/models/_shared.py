@@ -11,6 +11,7 @@ import pandas as pd
 
 from gridmind.exceptions import InsufficientHistoryError, ModelTrainingError
 from gridmind.features.builder import FeatureBuilder
+from gridmind.time_utils import to_utc_timestamp
 
 PREDICTION_COLUMNS = [
     "region",
@@ -45,11 +46,11 @@ def recursive_predict(
         raise InsufficientHistoryError(
             "All regions must have history through the same forecast origin."
         )
-    origin = pd.Timestamp(origins.iloc[0])
+    origin = to_utc_timestamp(origins.iloc[0])
     created_at = pd.Timestamp.now(tz=UTC)
     rows: list[dict[str, Any]] = []
     for step in range(1, horizon + 1):
-        timestamp = origin + pd.Timedelta(hours=step)
+        timestamp = to_utc_timestamp(origin + pd.Timedelta(hours=step))
         step_predictions: list[tuple[str, float]] = []
         for region in regions:
             feature_row = builder.build_future_row(working, region=region, timestamp=timestamp)

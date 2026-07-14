@@ -63,6 +63,7 @@ def build_weather_features(
     mode: WeatherMode = "realistic_forecast",
     lags: tuple[int, ...] = (1, 3, 6, 12, 24),
     rolling_windows: tuple[int, ...] = (3, 6, 12, 24),
+    drop_incomplete_history: bool = True,
 ) -> WeatherFeatureResult:
     """Build contemporaneous forecast/oracle fields and gap-isolated history features."""
     required_type = "forecast" if mode == "realistic_forecast" else "historical"
@@ -133,15 +134,19 @@ def build_weather_features(
     )
     names = tuple(dict.fromkeys((*WEATHER_BASE_FEATURES, *derived, *lag_names, *rolling_names)))
     invalid = result[list(names)].isna().any(axis=1)
+    output = result.loc[~invalid] if drop_incomplete_history else result
     report = {
         "weather_mode": mode,
         "source_rows": len(selected),
-        "output_rows": int((~invalid).sum()),
-        "excluded_rows": int(invalid.sum()),
+        "output_rows": len(output),
+        "excluded_rows": int(invalid.sum()) if drop_incomplete_history else 0,
+        "incomplete_history_rows_retained": int(invalid.sum())
+        if not drop_incomplete_history
+        else 0,
         "timestamp_gap_count": int(continuity.segments["missing_expected_hours_before"].sum()),
     }
     return WeatherFeatureResult(
-        result.drop(columns="region_segment_id").loc[~invalid].reset_index(drop=True),
+        output.drop(columns="region_segment_id").reset_index(drop=True),
         names,
         report,
     )

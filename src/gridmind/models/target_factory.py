@@ -16,6 +16,7 @@ from gridmind.exceptions import InsufficientHistoryError, TargetForecastError
 from gridmind.features.calendar import add_calendar_features
 from gridmind.features.contracts import CALENDAR_FEATURES, FeatureSpecification
 from gridmind.renewables.targets import WeatherMode, get_target_definition
+from gridmind.time_utils import format_utc_timestamp, to_utc_timestamp
 
 TARGET_FORECAST_COLUMNS = [
     "region",
@@ -123,22 +124,24 @@ class TargetForecaster:
         origins = observed.groupby("region", observed=True)["timestamp_utc"].max()
         if origins.empty or origins.nunique() != 1:
             raise InsufficientHistoryError("Targets must share one forecast origin across regions.")
-        origin = pd.Timestamp(origins.iloc[0])
+        origin = to_utc_timestamp(origins.iloc[0])
+        expected = pd.date_range(
+            start=origin + pd.Timedelta(hours=1),
+            periods=horizon,
+            freq="h",
+            tz="UTC",
+        )
+        if self.weather_features:
+            self._validate_weather_horizon(source, expected, origin)
         rows: list[dict[str, Any]] = []
         working = observed[["region", "timestamp_utc", self.target]].copy()
         self.clipping_count = 0
-        for step in range(1, horizon + 1):
-            timestamp = origin + pd.Timedelta(hours=step)
+        for step, timestamp in enumerate(expected, start=1):
             additions: list[dict[str, Any]] = []
             for region in sorted(str(value) for value in observed["region"].unique()):
                 weather_row = source.loc[
                     (source["region"] == region) & (source["timestamp_utc"] == timestamp)
                 ]
-                if self.weather_features and weather_row.empty:
-                    raise InsufficientHistoryError(
-                        f"Future {self.weather_mode} weather is missing for {region} "
-                        f"at {timestamp}."
-                    )
                 feature = self._future_row(working, weather_row, region, timestamp)
                 raw = float(
                     np.asarray(
@@ -168,6 +171,36 @@ class TargetForecaster:
             working = pd.concat([working, pd.DataFrame(additions)], ignore_index=True)
         return pd.DataFrame(rows)[TARGET_FORECAST_COLUMNS]
 
+    def _validate_weather_horizon(
+        self,
+        source: pd.DataFrame,
+        expected: pd.DatetimeIndex,
+        origin: pd.Timestamp,
+    ) -> None:
+        """Require exact UTC weather instants independently for every forecast region."""
+        regions = source.loc[source[self.target].notna(), "region"].unique()
+        for region in sorted(str(value) for value in regions):
+            available = pd.DatetimeIndex(
+                pd.to_datetime(
+                    source.loc[source["region"] == region, "timestamp_utc"],
+                    utc=True,
+                    errors="raise",
+                )
+            ).unique()
+            matched = expected.intersection(available)
+            missing = expected.difference(available)
+            if missing.empty:
+                continue
+            missing_text = ", ".join(format_utc_timestamp(value) for value in missing)
+            raise InsufficientHistoryError(
+                f"Future {self.weather_mode} weather is incomplete for {region}: "
+                f"forecast origin={format_utc_timestamp(origin)}, "
+                f"required start={format_utc_timestamp(expected[0])}, "
+                f"required end={format_utc_timestamp(expected[-1])}, "
+                f"required rows={len(expected)}, matched rows={len(matched)}, "
+                f"missing UTC timestamps=[{missing_text}]."
+            )
+
     def _future_row(
         self,
         working: pd.DataFrame,
@@ -185,8 +218,11 @@ class TargetForecaster:
             raise InsufficientHistoryError("Recursive target forecasting cannot cross a gap.")
         row = pd.DataFrame({"timestamp_utc": [timestamp], "region": [region]})
         add_calendar_features(row)
+        feature_values = row.iloc[0].to_dict()
         for lag in self.specification.lags:
-            row[f"target_lag_{lag}"] = float(values.loc[timestamp - pd.Timedelta(hours=lag)])
+            feature_values[f"target_lag_{lag}"] = float(
+                values.loc[timestamp - pd.Timedelta(hours=lag)]
+            )
         for window in self.specification.rolling_windows:
             recent = values.reindex(
                 pd.date_range(end=timestamp - pd.Timedelta(hours=1), periods=window, freq="h")
@@ -197,10 +233,12 @@ class TargetForecaster:
                 ("min", recent.min()),
                 ("max", recent.max()),
             ):
-                row[f"target_rolling_{stat}_{window}"] = float(value)
+                feature_values[f"target_rolling_{stat}_{window}"] = float(value)
         for name in self.weather_features:
-            row[name] = float(weather.iloc[0][name])
-        return row[list(self.specification.feature_names)]
+            feature_values[name] = float(weather.iloc[0][name])
+        return pd.DataFrame(
+            [{name: feature_values[name] for name in self.specification.feature_names}]
+        )
 
     def _build_training(self, frame: pd.DataFrame) -> pd.DataFrame:
         required = {"region", "timestamp_utc", self.target, *self.weather_features}

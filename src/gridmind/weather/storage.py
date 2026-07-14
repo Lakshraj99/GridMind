@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import duckdb
 import pandas as pd
 
+from gridmind.data.duckdb_connection import connect_duckdb
 from gridmind.weather.schemas import REGION_WEATHER_COLUMNS, WEATHER_COLUMNS
 
 
@@ -64,7 +64,7 @@ class WeatherStorage:
         )
 
     def read_regions(self, region: str, *, data_type: str | None = None) -> pd.DataFrame:
-        with duckdb.connect(str(self.path), read_only=True) as connection:
+        with connect_duckdb(self.path, read_only=True) as connection:
             clause = "region = ?"
             params: list[str] = [region]
             if data_type is not None:
@@ -81,10 +81,14 @@ class WeatherStorage:
 
     def _upsert(self, frame: pd.DataFrame, table: str, keys: list[str]) -> int:
         predicate = " AND ".join(f"source.{key} = target.{key}" for key in keys)
-        with duckdb.connect(str(self.path)) as connection:
+        incoming = frame.copy()
+        for column in ("timestamp_utc", "ingestion_timestamp_utc"):
+            if column in incoming:
+                incoming[column] = pd.to_datetime(incoming[column], utc=True, errors="raise")
+        with connect_duckdb(self.path) as connection:
             connection.execute("BEGIN TRANSACTION")
             try:
-                connection.register("incoming_weather", frame)
+                connection.register("incoming_weather", incoming)
                 connection.execute(
                     f"CREATE TABLE IF NOT EXISTS {table} AS "
                     "SELECT * FROM incoming_weather WHERE FALSE"

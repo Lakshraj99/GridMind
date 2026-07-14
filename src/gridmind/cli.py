@@ -452,7 +452,10 @@ def predict_target(
     except (GridMindError, MlflowException, OSError, ValueError, RuntimeError) as exc:
         typer.echo(f"Target prediction failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-    typer.echo(result.forecasts.to_string(index=False))
+    display = result.forecasts.copy()
+    for column in ("forecast_origin", "timestamp_utc", "created_at_utc"):
+        display[column] = display[column].map(format_utc_timestamp)
+    typer.echo(display.to_string(index=False))
     typer.echo(f"Parquet: {result.parquet_path}")
     typer.echo(f"DuckDB rows: {result.duckdb_rows:,}")
 
