@@ -26,5 +26,14 @@ jobs:
         run: python -m ruff check .
       - name: Mypy
         run: python -m mypy src
+      - name: Reset coverage data
+        run: |
+          python -m coverage erase
+          find . -maxdepth 2 -type f -name '.coverage*' -delete
       - name: Tests and coverage
-        run: python -m pytest --cov=src/gridmind --cov-report=term-missing --cov-fail-under=85
+        run: >-
+          python -m pytest
+          --cov=src/gridmind
+          --cov-config=pyproject.toml
+          --cov-report=term-missing
+          --cov-fail-under=85

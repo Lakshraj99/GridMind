@@ -71,3 +71,23 @@ class PredictionValidationError(GridMindError):
 
 class ExplainabilityError(GridMindError):
     """Raised when explainability artifacts cannot be generated."""
+
+
+class WeatherError(GridMindError):
+    """Base exception for weather configuration, transport, and validation failures."""
+
+
+class WeatherClientError(WeatherError):
+    """Raised when a weather provider request cannot be completed safely."""
+
+
+class WeatherLocationError(WeatherError):
+    """Raised when a region-to-location mapping is missing or invalid."""
+
+
+class RenewableDataError(GridMindError):
+    """Raised when renewable-generation data cannot be normalized or validated."""
+
+
+class TargetForecastError(GridMindError):
+    """Raised for unsupported or invalid Milestone 3 target workflows."""

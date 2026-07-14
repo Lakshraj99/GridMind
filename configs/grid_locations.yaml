@@ -1,0 +1,23 @@
+version: "1.0"
+source: "Representative major PJM load centers; weights are documented modelling assumptions."
+regions:
+  PJM:
+    aggregation: weighted_mean
+    rationale: "Balances eastern and western PJM weather exposure using major load centers."
+    locations:
+      - name: Philadelphia
+        latitude: 39.9526
+        longitude: -75.1652
+        weight: 0.30
+      - name: Pittsburgh
+        latitude: 40.4406
+        longitude: -79.9959
+        weight: 0.20
+      - name: Baltimore
+        latitude: 39.2904
+        longitude: -76.6122
+        weight: 0.20
+      - name: Washington_DC
+        latitude: 38.9072
+        longitude: -77.0369
+        weight: 0.30

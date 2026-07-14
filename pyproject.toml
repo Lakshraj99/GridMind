@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gridmind"
-version = "0.2.0"
-description = "Validated global electricity-demand forecasting and model lifecycle pipeline"
+version = "0.3.0"
+description = "Validated weather-aware demand, renewable-generation, and net-load forecasting"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -25,6 +25,7 @@ dependencies = [
   "pandera[pandas]>=0.20,<1",
   "pyarrow>=14,<21",
   "pydantic-settings>=2.5,<3",
+  "pyyaml>=6,<7",
   "scikit-learn>=1.5,<2",
   "shap>=0.46,<1",
   "typer>=0.12,<1",
@@ -76,6 +77,7 @@ module = [
   "optuna.*",
   "pandera.*",
   "pyarrow.*",
+  "yaml.*",
   "shap.*",
 ]
 ignore_missing_imports = true

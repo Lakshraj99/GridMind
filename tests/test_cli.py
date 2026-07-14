@@ -28,6 +28,11 @@ def test_root_and_command_help() -> None:
         "predict",
         "leaderboard",
         "explain",
+        "weather-ingest",
+        "renewables-ingest",
+        "train-target",
+        "predict-target",
+        "target-leaderboard",
     ):
         result = runner.invoke(cli_module.app, [command, "--help"])
         assert result.exit_code == 0

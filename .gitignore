@@ -7,9 +7,13 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 data/raw/*
 data/processed/*
+data/weather/*
+data/renewables/*
 data/*.duckdb
 data/*.duckdb.*
 data/*.db

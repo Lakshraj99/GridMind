@@ -30,6 +30,7 @@ class EIAClient:
     """Communicate with EIA without performing data modelling or persistence."""
 
     route = "/electricity/rto/region-data/data/"
+    renewable_route = "/electricity/rto/fuel-type-data/data/"
 
     def __init__(
         self,
@@ -65,6 +66,11 @@ class EIAClient:
     def redaction_secrets(self) -> tuple[str, ...]:
         """Return credentials exclusively for sanitizing response artifacts."""
         return (self._api_key,)
+
+    @property
+    def renewable_data_url(self) -> str:
+        """Return the EIA hourly fuel-type endpoint."""
+        return f"{self._base_url}{self.renewable_route}"
 
     def build_params(
         self,
@@ -129,6 +135,43 @@ class EIAClient:
                 break
         return EIAFetchResult(records=records, pages=pages)
 
+    def fetch_renewable_data(
+        self,
+        region: str,
+        start_date: str | date | datetime,
+        end_date: str | date | datetime,
+    ) -> EIAFetchResult:
+        """Fetch solar and wind generation records from EIA's fuel-type endpoint."""
+        records: list[dict[str, Any]] = []
+        pages: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            params = self.build_params(region, start_date, end_date, offset=offset)
+            params["facets[fueltype][]"] = ["SUN", "WND"]  # type: ignore[assignment]
+            params["sort[1][column]"] = "fueltype"
+            payload = self._request(params, url=self.renewable_data_url)
+            response = payload.get("response")
+            if not isinstance(response, Mapping) or not isinstance(response.get("data"), list):
+                raise EIAMalformedResponseError(
+                    "EIA renewable response must contain response.data."
+                )
+            page = response["data"]
+            if not all(isinstance(item, dict) for item in page):
+                raise EIAMalformedResponseError("EIA renewable response contains a non-object.")
+            typed = [dict(item) for item in page]
+            pages.append(payload)
+            records.extend(typed)
+            try:
+                total = int(response.get("total", len(records)))
+            except (TypeError, ValueError) as exc:
+                raise EIAMalformedResponseError("EIA renewable total must be an integer.") from exc
+            if not typed:
+                break
+            offset += len(typed)
+            if len(typed) < self._page_size and offset >= total:
+                break
+        return EIAFetchResult(records, pages)
+
     def close(self) -> None:
         """Close an internally-created HTTP client."""
         if self._owns_client:
@@ -140,11 +183,13 @@ class EIAClient:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def _request(self, params: dict[str, str | int]) -> dict[str, Any]:
+    def _request(self, params: dict[str, Any], *, url: str | None = None) -> dict[str, Any]:
         last_status: int | None = None
         for attempt in range(self._max_retries + 1):
             try:
-                response = self._client.get(self.data_url, params=params, timeout=self._timeout)
+                response = self._client.get(
+                    url or self.data_url, params=params, timeout=self._timeout
+                )
             except httpx.RequestError:
                 if attempt == self._max_retries:
                     raise EIANetworkError(

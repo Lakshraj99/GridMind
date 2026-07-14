@@ -260,6 +260,111 @@ relative improvement is retained when ML is worse; it is never presented as a ga
 Zero denominators produce an undefined (`null` in JSON) ratio rather than infinity or a crash.
 Reports contain overall metrics and each rolling window.
 
+## Milestone 3: weather, renewables, and net load
+
+Milestone 3 adds cached Open-Meteo historical/forecast ingestion, weighted regional weather,
+EIA solar and wind targets, and independent forecasting for demand, solar, wind, total
+renewables, and net load. Existing Milestone 1/2 demand commands and the original demand
+registry remain unchanged.
+
+```mermaid
+flowchart LR
+    OM["Open-Meteo historical / forecast"] --> WC["Cached weather client"]
+    MAP["YAML region-location mapping"] --> AGG["Weighted + circular aggregation"]
+    WC --> AGG --> WDB["hourly_region_weather"]
+    EIA["EIA fuel-type data"] --> REN["Solar / wind validation + quarantine"]
+    REN --> RDB["hourly_renewable_generation"]
+    GRID["hourly_grid_data"] --> NET["Complete-case net load"]
+    RDB --> NET
+    WDB --> TF["Gap-aware target features"]
+    RDB --> TF
+    NET --> TF
+    TF --> EVAL["Shared-window target evaluation"]
+    EVAL --> MLF["Target-specific MLflow registry"]
+    EVAL --> FDB["target_forecasts"]
+```
+
+### Weather mapping and leakage modes
+
+Locations are configured in `configs/grid_locations.yaml`; adding a region does not require a
+Python change. PJM uses Philadelphia, Pittsburgh, Baltimore, and Washington, DC as representative
+major load centers. Their weights are modelling assumptions—not population or load measurements—
+and are normalized on load. Latitude, longitude, positive weights, unique names, mapping version,
+source, and rationale are validated.
+
+`realistic_forecast` is the default experiment mode and accepts only forecast-labelled weather.
+When archived forecasts are unavailable during training, GridMind can create a documented 24-hour
+weather-persistence simulation using only information available at `t-24`. `historical_oracle`
+uses observed contemporaneous weather and is always labelled separately. The modes are never
+mixed in one leaderboard. Weather lags and rolling statistics restart at UTC timestamp gaps.
+
+### Renewable and net-load targets
+
+EIA `SUN`/solar and `WND`/wind records map to explicit nullable targets. Missing generation is
+never assumed to be zero; negative source rows are quarantined. Total renewable generation exists
+only when both component values exist. Net load is computed only on complete overlap:
+
+```text
+net_load_mw = demand_mw - total_renewable_generation_mw
+```
+
+Net load may be negative. Direct LightGBM/CatBoost forecasts are compared with a component method
+that forecasts demand, solar, and wind on the same validation windows before subtraction. Solar
+and wind forecasts use an explicit non-negative clipping policy whose activation count is reported.
+
+### Milestone 3 commands
+
+```bash
+gridmind weather-ingest --region PJM --start-date 2023-01-01 --end-date 2025-12-31
+gridmind weather-ingest --region PJM --start-date 2026-07-13 --end-date 2026-07-19 --data-type forecast
+gridmind renewables-ingest --region PJM --start-date 2023-01-01 --end-date 2025-12-31
+
+gridmind train-target --target demand_mw --region PJM \
+  --weather-mode realistic_forecast --models lightgbm,catboost
+gridmind train-target --target solar_generation_mw --region PJM
+gridmind train-target --target wind_generation_mw --region PJM
+gridmind train-target --target net_load_mw --region PJM \
+  --net-load-method direct,component
+
+gridmind predict-target --target net_load_mw --region PJM --horizon 24 \
+  --model-alias champion
+gridmind target-leaderboard --target net_load_mw
+```
+
+Target models use separate registry names and independent candidate/champion aliases. The
+weather-demand registry does not overwrite the Milestone 2 demand champion. Promotion requires
+finite metrics and bias, bundle reload, valid predictions/output constraints, and improvement over
+the target's reference baseline.
+
+### Milestone 3 storage and quality artifacts
+
+| Data | Location |
+|---|---|
+| Raw weather cache | `data/weather/raw/*.json` |
+| Processed weather Parquet | `data/weather/processed/` |
+| Location weather | DuckDB `hourly_location_weather` |
+| Regional weather | DuckDB `hourly_region_weather` |
+| Renewable Parquet | `data/renewables/processed/` |
+| Renewable generation | DuckDB `hourly_renewable_generation` |
+| Complete-case net load | DuckDB view `target_net_load` |
+| Shared target forecasts | DuckDB `target_forecasts` |
+| Weather/renewable reports | `artifacts/data_quality/` |
+| Target training artifacts | `artifacts/training_targets/<target>/<timestamp>/` |
+
+Coverage reports include weather gaps/duplicates/missing variables, mapping version, cache hits,
+renewable gaps/missing components/quarantine, demand-renewable overlap, and net-load availability.
+
+### Current Milestone 3 limitations
+
+- Open-Meteo forecast ingestion stores provider forecasts but does not yet reconstruct historical
+  forecast vintages; realistic historical evaluation therefore uses stored archives when present
+  or the labelled persistence simulation.
+- Region-location weights are documented representative assumptions and should be recalibrated
+  against subregional load before operational use.
+- Recursive tree forecasts can accumulate error at deeper horizons.
+- This milestone intentionally excludes anomaly detection, battery dispatch, online API serving,
+  dashboards, Kafka, Kubernetes, cloud deployment, deep learning, and LLM assistants.
+
 ## Testing and quality
 
 Tests use `httpx.MockTransport` and the checked-in JSON fixture; they never call EIA.
@@ -271,6 +376,11 @@ make coverage
 # or all quality gates
 make check
 ```
+
+Coverage uses the branch-enabled configuration in `pyproject.toml`. The CI workflow and
+`make coverage` run `coverage erase`, remove any remaining `.coverage*` subprocess databases,
+and pass that configuration explicitly, preventing statement-only data from being combined with
+branch data.
 
 CI runs Ruff formatting/linting, strict mypy, and pytest with an 85% coverage floor on every
 push and pull request. No EIA key is required.

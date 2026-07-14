@@ -20,7 +20,10 @@ test:
 	$(PYTHON) -m pytest
 
 coverage:
-	$(PYTHON) -m pytest --cov=src/gridmind --cov-report=term-missing --cov-report=html
+	$(PYTHON) -m coverage erase
+	find . -maxdepth 2 -type f -name '.coverage*' -delete
+	$(PYTHON) -m pytest --cov=src/gridmind --cov-config=pyproject.toml \
+		--cov-report=term-missing --cov-report=html --cov-fail-under=85
 
 ingest:
 	$(PYTHON) -m gridmind.cli ingest
