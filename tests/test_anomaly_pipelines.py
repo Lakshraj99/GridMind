@@ -76,21 +76,47 @@ def test_detection_pipeline_persists_events_alerts_detector_bundle_and_artifacts
         "feature_schema.json",
         "threshold_report.json",
         "alert_summary.json",
+        "anomaly_rate_report.csv",
+        "lifecycle_summary.json",
     ):
         assert (result.artifact_dir / filename).exists()
     assert AnomalyStorage(database).count() == result.anomaly_rows
     assert AlertStorage(database).count() >= 1
+    event_count = AnomalyStorage(database).count()
+    alert_count = AlertStorage(database).count()
+    history_count = len(AlertStorage(database).read_history())
     rerun = run_anomaly_detection(
         settings,
         region="PJM",
         targets=("demand_mw",),
         start_date=frame["timestamp_utc"].iloc[120].isoformat(),
         end_date=frame["timestamp_utc"].iloc[160].isoformat(),
-        detectors=("rules",),
+        detectors=("rules", "residual", "isolation_forest"),
         mlflow_enabled=False,
         artifact_root=tmp_path / "anomalies",
     )
-    assert rerun.anomaly_rows >= result.anomaly_rows
+    assert AnomalyStorage(database).count() == event_count
+    assert AlertStorage(database).count() == alert_count
+    assert len(AlertStorage(database).read_history()) == history_count
+    assert rerun.alerts_opened == 0
+    assert rerun.alerts_updated == 0
+    assert rerun.alerts_unchanged > 0
+    assert set(rerun.anomaly_rate_report).issuperset(
+        {
+            "target",
+            "detector_name",
+            "anomaly_type",
+            "severity",
+            "day_utc",
+            "evaluated_rows",
+            "event_count",
+            "anomaly_rate",
+            "alerts_opened",
+            "alerts_updated",
+            "alerts_unchanged",
+            "effective_isolation_rate",
+        }
+    )
 
 
 def test_offline_backtest_writes_metrics_without_mutating_production_data(tmp_path: Path) -> None:
@@ -168,6 +194,10 @@ def test_anomaly_cli_help_success_invalid_and_failure_paths(
         anomalies=pd.DataFrame({"severity": ["warning"], "detector_name": ["rules"]}),
         alerts_opened=1,
         alerts_updated=0,
+        alerts_unchanged=3,
+        alerts_auto_resolved=0,
+        lifecycle_counts={"acknowledged": 0, "resolved": 0, "suppressed": 0},
+        detector_report={},
         artifact_dir=tmp_path / "artifacts",
     )
     monkeypatch.setattr(  # type: ignore[attr-defined]
@@ -190,6 +220,7 @@ def test_anomaly_cli_help_success_invalid_and_failure_paths(
     )
     assert success.exit_code == 0
     assert "Rows evaluated: 10" in success.output
+    assert "opened=1; updated=0; unchanged=3" in success.output
     assert runner.invoke(cli_module.app, ["alerts", "--severity", "severe"]).exit_code != 0
 
     def fail(*_args: object, **_kwargs: object) -> None:

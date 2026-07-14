@@ -14,7 +14,7 @@ import mlflow
 import numpy as np
 import pandas as pd
 
-from gridmind.alerts.lifecycle import AlertManager
+from gridmind.alerts.lifecycle import AlertManager, empty_lifecycle_counts
 from gridmind.alerts.storage import AlertStorage
 from gridmind.anomalies.contracts import ANOMALY_COLUMNS, empty_anomaly_frame
 from gridmind.anomalies.ensemble import combine_detector_events
@@ -43,9 +43,13 @@ class DetectionPipelineResult:
     anomaly_rows: int
     alerts_opened: int
     alerts_updated: int
+    alerts_unchanged: int
+    alerts_auto_resolved: int
     artifact_dir: Path
     mlflow_run_id: str | None
     detector_report: dict[str, Any]
+    lifecycle_counts: dict[str, int]
+    anomaly_rate_report: pd.DataFrame
 
 
 def run_anomaly_detection(
@@ -95,6 +99,13 @@ def run_anomaly_detection(
                     demand_change_threshold=settings.demand_spike_pct_threshold,
                     renewable_drop_threshold=settings.renewable_drop_pct_threshold,
                     flatline_hours=settings.flatline_hours,
+                    flatline_tolerance=settings.flatline_tolerance,
+                    solar_daylight_radiation_threshold_wm2=(
+                        settings.solar_daylight_radiation_threshold_wm2
+                    ),
+                    solar_min_expected_generation_mw=(settings.solar_min_expected_generation_mw),
+                    solar_min_absolute_drop_mw=settings.solar_min_absolute_drop_mw,
+                    solar_min_drop_duration_hours=settings.solar_min_drop_duration_hours,
                     missing_warning_count=settings.missing_hour_warning_count,
                     missing_critical_count=settings.missing_hour_critical_count,
                     stale_after_hours=settings.alert_auto_resolve_hours,
@@ -153,9 +164,13 @@ def run_anomaly_detection(
                 model = MultivariateDetector(
                     feature_names,
                     IsolationForestConfig(
+                        target=target,
                         contamination=settings.anomaly_contamination,
                         random_seed=settings.anomaly_random_seed,
                         min_training_rows=settings.anomaly_min_training_rows,
+                        score_quantile=_isolation_score_quantile(settings, target),
+                        extreme_score_quantile=settings.isolation_extreme_score_quantile,
+                        maximum_anomaly_rate=settings.anomaly_max_rate,
                     ),
                 ).fit(training)
                 scored = model.score(scoring)
@@ -166,6 +181,7 @@ def run_anomaly_detection(
                     isolation_training_rows=scored.training_rows,
                     isolation_excluded_rows=scored.excluded_rows,
                     isolation_gap_count=scored.gap_count,
+                    isolation_calibration=scored.calibration,
                 )
             else:
                 target_report["isolation_condition"] = "insufficient chronological training rows"
@@ -187,11 +203,25 @@ def run_anomaly_detection(
         auto_resolve_hours=settings.alert_auto_resolve_hours,
     )
     alert_counts = (
-        alert_manager.process(alert_input) if not alert_input.empty else {"opened": 0, "updated": 0}
+        alert_manager.process(alert_input)
+        if not alert_input.empty
+        else {**empty_lifecycle_counts(), "total": AlertStorage(settings.duckdb_path).count()}
     )
-    alert_manager.auto_resolve(now=end)
+    alert_counts["auto_resolved"] = alert_manager.auto_resolve(now=end)
+    rate_report = _build_anomaly_rate_report(
+        all_events,
+        detector_report,
+        rows_evaluated=rows_evaluated,
+        alert_counts=alert_counts,
+    )
     _write_detection_artifacts(
-        artifact_dir, all_events, detector_report, alert_counts, targets, detectors
+        artifact_dir,
+        all_events,
+        detector_report,
+        alert_counts,
+        rate_report,
+        targets,
+        detectors,
     )
     run_id = _log_detection_mlflow(
         settings,
@@ -207,14 +237,18 @@ def run_anomaly_detection(
         enabled=settings.mlflow_enabled if mlflow_enabled is None else mlflow_enabled,
     )
     return DetectionPipelineResult(
-        rows_evaluated,
-        all_events,
-        anomaly_rows,
-        int(alert_counts["opened"]),
-        int(alert_counts["updated"]),
-        artifact_dir,
-        run_id,
-        detector_report,
+        rows_evaluated=rows_evaluated,
+        anomalies=all_events,
+        anomaly_rows=anomaly_rows,
+        alerts_opened=int(alert_counts["opened"]),
+        alerts_updated=int(alert_counts["updated"]),
+        alerts_unchanged=int(alert_counts["unchanged"]),
+        alerts_auto_resolved=int(alert_counts["auto_resolved"]),
+        artifact_dir=artifact_dir,
+        mlflow_run_id=run_id,
+        detector_report=detector_report,
+        lifecycle_counts=alert_counts,
+        anomaly_rate_report=rate_report,
     )
 
 
@@ -314,11 +348,81 @@ def _multivariate_features(
     return result
 
 
+def _isolation_score_quantile(settings: Settings, target: str) -> float:
+    return {
+        "demand_mw": settings.isolation_demand_score_quantile,
+        "solar_generation_mw": settings.isolation_solar_score_quantile,
+        "wind_generation_mw": settings.isolation_wind_score_quantile,
+        "net_load_mw": settings.isolation_net_load_score_quantile,
+    }.get(target, settings.isolation_net_load_score_quantile)
+
+
+def _build_anomaly_rate_report(
+    events: pd.DataFrame,
+    detector_report: dict[str, Any],
+    *,
+    rows_evaluated: int,
+    alert_counts: dict[str, int],
+) -> pd.DataFrame:
+    columns = [
+        "target",
+        "detector_name",
+        "anomaly_type",
+        "severity",
+        "day_utc",
+        "evaluated_rows",
+        "event_count",
+        "anomaly_rate",
+        "alerts_opened",
+        "alerts_updated",
+        "alerts_unchanged",
+        "effective_isolation_rate",
+        "calibration_warning",
+    ]
+    if events.empty:
+        return pd.DataFrame(columns=columns)
+    report = events.copy()
+    report["day_utc"] = pd.to_datetime(report["timestamp_utc"], utc=True).dt.strftime("%Y-%m-%d")
+    grouped = (
+        report.groupby(
+            ["target", "detector_name", "anomaly_type", "severity", "day_utc"],
+            dropna=False,
+        )
+        .size()
+        .rename("event_count")
+        .reset_index()
+    )
+    evaluated_by_target = {
+        target: int(target_report.get("rows", 0))
+        for target, target_report in detector_report.items()
+    }
+    isolation_rates = {
+        target: float(
+            target_report.get("isolation_calibration", {}).get("effective_anomaly_percentage", 0.0)
+        )
+        / 100.0
+        for target, target_report in detector_report.items()
+    }
+    warnings = {
+        target: str(target_report.get("isolation_calibration", {}).get("calibration_warning") or "")
+        for target, target_report in detector_report.items()
+    }
+    grouped["evaluated_rows"] = grouped["target"].map(evaluated_by_target).fillna(rows_evaluated)
+    grouped["anomaly_rate"] = grouped["event_count"] / grouped["evaluated_rows"].replace(0, np.nan)
+    grouped["alerts_opened"] = int(alert_counts["opened"])
+    grouped["alerts_updated"] = int(alert_counts["updated"])
+    grouped["alerts_unchanged"] = int(alert_counts["unchanged"])
+    grouped["effective_isolation_rate"] = grouped["target"].map(isolation_rates).fillna(0.0)
+    grouped["calibration_warning"] = grouped["target"].map(warnings).fillna("")
+    return grouped[columns].sort_values(columns[:5], kind="stable").reset_index(drop=True)
+
+
 def _write_detection_artifacts(
     artifact_dir: Path,
     events: pd.DataFrame,
     detector_report: dict[str, Any],
     alert_counts: dict[str, int],
+    anomaly_rate_report: pd.DataFrame,
     targets: tuple[str, ...],
     detectors: tuple[str, ...],
 ) -> None:
@@ -335,6 +439,8 @@ def _write_detection_artifacts(
     )
     write_json_report({"detector_report": detector_report}, artifact_dir / "threshold_report.json")
     write_json_report(alert_counts, artifact_dir / "alert_summary.json")
+    write_json_report(alert_counts, artifact_dir / "lifecycle_summary.json")
+    anomaly_rate_report.to_csv(artifact_dir / "anomaly_rate_report.csv", index=False)
 
 
 def _log_detection_mlflow(

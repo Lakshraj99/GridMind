@@ -19,10 +19,14 @@ from gridmind.exceptions import AnomalyDetectionError
 
 @dataclass(frozen=True)
 class IsolationForestConfig:
+    target: str = "demand_mw"
     contamination: float = 0.01
     random_seed: int = 42
     min_training_rows: int = 336
     n_estimators: int = 100
+    score_quantile: float = 0.995
+    extreme_score_quantile: float = 0.9995
+    maximum_anomaly_rate: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,8 @@ class MultivariateResult:
     excluded_rows: int
     training_rows: int
     gap_count: int
+    calibration: dict[str, Any]
+    calibration_warning: str | None
 
 
 class MultivariateDetector:
@@ -52,6 +58,9 @@ class MultivariateDetector:
         self.reference: dict[str, dict[str, tuple[float, float]]] = {}
         self.training_end: dict[str, pd.Timestamp] = {}
         self.training_row_counts: dict[str, int] = {}
+        self.training_scores: dict[str, np.ndarray[Any, np.dtype[np.float64]]] = {}
+        self.score_thresholds: dict[str, float] = {}
+        self.extreme_thresholds: dict[str, float] = {}
 
     def fit(self, history: pd.DataFrame) -> MultivariateDetector:
         source = self._prepare(history)
@@ -79,6 +88,14 @@ class MultivariateDetector:
             }
             self.training_end[key] = pd.Timestamp(clean["timestamp_utc"].max())
             self.training_row_counts[key] = len(clean)
+            training_scores = -model.score_samples(scaler.transform(x))
+            self.training_scores[key] = np.asarray(training_scores, dtype=np.float64)
+            self.score_thresholds[key] = float(
+                np.quantile(training_scores, self.config.score_quantile)
+            )
+            self.extreme_thresholds[key] = float(
+                np.quantile(training_scores, self.config.extreme_score_quantile)
+            )
         return self
 
     def score(self, frame: pd.DataFrame) -> MultivariateResult:
@@ -93,6 +110,8 @@ class MultivariateDetector:
         )
         scored_parts: list[pd.DataFrame] = []
         events: list[dict[str, object]] = []
+        all_scoring_scores: list[float] = []
+        all_training_scores: list[float] = []
         excluded = 0
         for region, group in source.groupby("region", sort=True, observed=True):
             key = str(region)
@@ -110,16 +129,33 @@ class MultivariateDetector:
                 complete[list(self.feature_names)].to_numpy(dtype=float)
             )
             decisions = self.models[key].decision_function(transformed)
-            predictions = self.models[key].predict(transformed)
+            outlier_scores = -self.models[key].score_samples(transformed)
+            selected_threshold = self.score_thresholds[key]
+            extreme_threshold = self.extreme_thresholds[key]
+            predictions = outlier_scores >= selected_threshold
+            extremes = outlier_scores >= extreme_threshold
             complete["isolation_decision"] = decisions
-            complete["is_outlier"] = predictions == -1
+            complete["isolation_score"] = outlier_scores
+            complete["is_outlier"] = predictions
+            complete["is_extreme_outlier"] = extremes
             scored_parts.append(complete)
-            for position in np.flatnonzero(predictions == -1):
+            all_scoring_scores.extend(float(value) for value in outlier_scores)
+            all_training_scores.extend(float(value) for value in self.training_scores[key])
+            for position in np.flatnonzero(predictions):
                 row = complete.iloc[position]
-                raw_score = float(max(0.0, -decisions[position]))
-                score = min(69.0, 30.0 + raw_score * 200.0)
+                is_extreme = bool(extremes[position])
+                exceedance = max(
+                    0.0,
+                    float(outlier_scores[position] - selected_threshold)
+                    / max(abs(selected_threshold), 1e-12),
+                )
+                score = (
+                    min(69.0, 50.0 + exceedance * 100.0)
+                    if is_extreme
+                    else min(29.0, 15.0 + exceedance * 100.0)
+                )
                 deviations = self._deviations(key, row)
-                target = self._target_name(row)
+                target = self.config.target
                 events.append(
                     make_anomaly(
                         region=key,
@@ -128,7 +164,7 @@ class MultivariateDetector:
                         detector_name=self.name,
                         anomaly_type="multivariate_outlier",
                         anomaly_score=score,
-                        severity="warning" if score >= 30 else "info",
+                        severity="warning" if is_extreme else "info",
                         observed_value=float(row[target])
                         if target in row and pd.notna(row[target])
                         else None,
@@ -137,19 +173,53 @@ class MultivariateDetector:
                             "IsolationForest flagged a joint feature pattern; deviations are "
                             "associative, not causal."
                         ),
-                        metadata={"decision_function": float(decisions[position])},
+                        metadata={
+                            "decision_function": float(decisions[position]),
+                            "outlier_score": float(outlier_scores[position]),
+                            "selected_score_threshold": selected_threshold,
+                            "extreme_score_threshold": extreme_threshold,
+                            "score_quantile": self.config.score_quantile,
+                            "extreme_score_quantile": self.config.extreme_score_quantile,
+                            "standalone_extreme": is_extreme,
+                        },
                     )
                 )
         anomalies = (
             validate_anomaly_frame(pd.DataFrame(events)) if events else empty_anomaly_frame()
         )
         scored = pd.concat(scored_parts, ignore_index=True) if scored_parts else pd.DataFrame()
+        evaluated_rows = len(scored)
+        flagged_rows = len(anomalies)
+        effective_rate = flagged_rows / evaluated_rows if evaluated_rows else 0.0
+        warning = (
+            f"IsolationForest {self.config.target} flagged {effective_rate:.2%}, exceeding "
+            f"the configured maximum {self.config.maximum_anomaly_rate:.2%}; review calibration."
+            if effective_rate > self.config.maximum_anomaly_rate
+            else None
+        )
+        calibration: dict[str, Any] = {
+            "target": self.config.target,
+            "configured_contamination": self.config.contamination,
+            "score_quantile": self.config.score_quantile,
+            "extreme_score_quantile": self.config.extreme_score_quantile,
+            "selected_score_thresholds": self.score_thresholds,
+            "extreme_score_thresholds": self.extreme_thresholds,
+            "fitted_score_distribution": self._distribution(all_training_scores),
+            "scoring_score_distribution": self._distribution(all_scoring_scores),
+            "evaluated_row_count": evaluated_rows,
+            "flagged_row_count": flagged_rows,
+            "effective_anomaly_percentage": effective_rate * 100.0,
+            "maximum_anomaly_rate": self.config.maximum_anomaly_rate,
+            "calibration_warning": warning,
+        }
         return MultivariateResult(
             anomalies,
             scored,
             excluded,
             sum(self.training_row_counts.values()),
             gap_count,
+            calibration,
+            warning,
         )
 
     def save(self, path: Path) -> Path:
@@ -159,6 +229,11 @@ class MultivariateDetector:
             "feature_names": list(self.feature_names),
             "detector_version": self.version,
             "regions": sorted(self.models),
+            "target": self.config.target,
+            "score_quantile": self.config.score_quantile,
+            "extreme_score_quantile": self.config.extreme_score_quantile,
+            "selected_score_thresholds": self.score_thresholds,
+            "extreme_score_thresholds": self.extreme_thresholds,
             "training_end_utc": {
                 key: value.isoformat() for key, value in self.training_end.items()
             },
@@ -198,8 +273,16 @@ class MultivariateDetector:
         return {name: {"standard_deviations": value} for name, value in deviations[:5]}
 
     @staticmethod
-    def _target_name(row: pd.Series) -> str:
-        for target in ("demand_mw", "net_load_mw", "solar_generation_mw", "wind_generation_mw"):
-            if target in row.index:
-                return target
-        return "demand_mw"
+    def _distribution(values: list[float]) -> dict[str, float | None]:
+        if not values:
+            return {key: None for key in ("min", "p25", "p50", "p75", "p95", "p99", "max")}
+        data = np.asarray(values, dtype=float)
+        return {
+            "min": float(np.min(data)),
+            "p25": float(np.quantile(data, 0.25)),
+            "p50": float(np.quantile(data, 0.50)),
+            "p75": float(np.quantile(data, 0.75)),
+            "p95": float(np.quantile(data, 0.95)),
+            "p99": float(np.quantile(data, 0.99)),
+            "max": float(np.max(data)),
+        }

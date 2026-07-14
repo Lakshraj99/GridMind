@@ -119,7 +119,11 @@ def test_isolation_forest_is_deterministic_region_isolated_and_serializable(
 ) -> None:
     training, scoring = _multivariate_frames()
     config = IsolationForestConfig(
-        contamination=0.05, random_seed=7, min_training_rows=60, n_estimators=30
+        contamination=0.05,
+        random_seed=7,
+        min_training_rows=60,
+        n_estimators=30,
+        score_quantile=0.95,
     )
     first = MultivariateDetector(("demand_mw", "temperature_c"), config).fit(training)
     result = first.score(scoring)
@@ -155,6 +159,36 @@ def test_isolation_forest_validates_features_and_region_contract() -> None:
     unknown["region"] = "ERCOT"
     with pytest.raises(AnomalyDetectionError, match="No fitted"):
         detector.score(unknown)
+
+
+def test_isolation_forest_target_thresholds_and_excessive_rate_warning() -> None:
+    training, scoring = _multivariate_frames()
+    lower = MultivariateDetector(
+        ("demand_mw", "temperature_c"),
+        IsolationForestConfig(
+            target="demand_mw",
+            min_training_rows=60,
+            n_estimators=20,
+            score_quantile=0.80,
+            maximum_anomaly_rate=0.01,
+        ),
+    ).fit(training)
+    higher = MultivariateDetector(
+        ("demand_mw", "temperature_c"),
+        IsolationForestConfig(
+            target="net_load_mw", min_training_rows=60, n_estimators=20, score_quantile=0.99
+        ),
+    ).fit(training)
+    assert all(
+        lower.score_thresholds[region] < higher.score_thresholds[region]
+        for region in ("PJM", "MISO")
+    )
+    result = lower.score(scoring)
+    assert result.calibration["target"] == "demand_mw"
+    assert result.calibration["evaluated_row_count"] == len(scoring) - 1
+    assert result.calibration["flagged_row_count"] == len(result.anomalies)
+    assert result.calibration_warning is not None
+    assert "exceeding" in result.calibration_warning
 
 
 def test_ensemble_contributions_critical_override_and_score_bounds() -> None:

@@ -15,6 +15,7 @@ from gridmind.anomalies.contracts import (
     validate_anomaly_frame,
 )
 from gridmind.anomalies.severity import severity_from_score, severity_score
+from gridmind.time_utils import format_utc_timestamp
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,11 @@ class RuleConfig:
     demand_change_threshold: float = 0.20
     renewable_drop_threshold: float = 0.30
     flatline_hours: int = 4
+    flatline_tolerance: float = 0.0
+    solar_daylight_radiation_threshold_wm2: float = 25.0
+    solar_min_expected_generation_mw: float = 100.0
+    solar_min_absolute_drop_mw: float = 100.0
+    solar_min_drop_duration_hours: int = 2
     missing_warning_count: int = 1
     missing_critical_count: int = 3
     stale_after_hours: int = 24
@@ -51,6 +57,19 @@ class RuleDetector:
             raise ValueError(f"Rule input is missing columns: {sorted(missing)}")
         source = frame.copy()
         source["timestamp_utc"] = pd.to_datetime(source["timestamp_utc"], utc=True, errors="raise")
+        if weather is not None and target == "solar_generation_mw":
+            context_columns = [
+                column
+                for column in ("shortwave_radiation_wm2", "daylight_indicator")
+                if column in weather
+            ]
+            if context_columns:
+                context = weather[["region", "timestamp_utc", *context_columns]].copy()
+                context["timestamp_utc"] = pd.to_datetime(context["timestamp_utc"], utc=True)
+                context = context.drop_duplicates(["region", "timestamp_utc"], keep="last")
+                source = source.merge(
+                    context, on=["region", "timestamp_utc"], how="left", validate="many_to_one"
+                )
         detected_at = now or pd.Timestamp.now(tz=UTC)
         events: list[dict[str, object]] = []
         events.extend(self._ordering_events(source, target, detected_at))
@@ -155,7 +174,7 @@ class RuleDetector:
         detected_at: pd.Timestamp,
     ) -> list[dict[str, object]]:
         events: list[dict[str, object]] = []
-        unique = group.drop_duplicates("timestamp_utc", keep="last").copy()
+        unique = group.drop_duplicates("timestamp_utc", keep="last").reset_index(drop=True)
         timestamps = pd.DatetimeIndex(unique["timestamp_utc"])
         if len(timestamps):
             deltas = pd.Series(timestamps).diff()
@@ -251,6 +270,8 @@ class RuleDetector:
         target: str,
         detected_at: pd.Timestamp,
     ) -> list[dict[str, object]]:
+        if target == "solar_generation_mw":
+            return self._solar_drop_events(group, values, region, target, detected_at)
         prior = values.shift(1)
         consecutive = group["timestamp_utc"].diff().eq(pd.Timedelta(hours=1))
         change = (values - prior) / prior.abs().replace(0, np.nan)
@@ -291,6 +312,87 @@ class RuleDetector:
             )
         return events
 
+    def _solar_drop_events(
+        self,
+        group: pd.DataFrame,
+        values: pd.Series,
+        region: str,
+        target: str,
+        detected_at: pd.Timestamp,
+    ) -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        position = 1
+        while position < len(group):
+            expected = float(values.iloc[position - 1])
+            observed = float(values.iloc[position])
+            relative_drop = (expected - observed) / abs(expected) if expected else 0.0
+            qualifies = (
+                group["timestamp_utc"].iloc[position] - group["timestamp_utc"].iloc[position - 1]
+                == pd.Timedelta(hours=1)
+                and self._solar_daylight(group.iloc[position])
+                and expected >= self.config.solar_min_expected_generation_mw
+                and expected - observed >= self.config.solar_min_absolute_drop_mw
+                and relative_drop >= self.config.renewable_drop_threshold
+            )
+            if not qualifies:
+                position += 1
+                continue
+            end_position = position
+            while end_position + 1 < len(group):
+                candidate = end_position + 1
+                candidate_value = float(values.iloc[candidate])
+                if not (
+                    group["timestamp_utc"].iloc[candidate]
+                    - group["timestamp_utc"].iloc[candidate - 1]
+                    == pd.Timedelta(hours=1)
+                    and self._solar_daylight(group.iloc[candidate])
+                    and expected - candidate_value >= self.config.solar_min_absolute_drop_mw
+                    and (expected - candidate_value) / abs(expected)
+                    >= self.config.renewable_drop_threshold
+                ):
+                    break
+                end_position = candidate
+            duration = end_position - position + 1
+            if duration >= self.config.solar_min_drop_duration_hours:
+                score = severity_score(magnitude=relative_drop, duration_hours=duration)
+                start_timestamp = group["timestamp_utc"].iloc[position]
+                end_timestamp = group["timestamp_utc"].iloc[end_position]
+                events.append(
+                    make_anomaly(
+                        region=region,
+                        target=target,
+                        timestamp=start_timestamp,
+                        detector_name=self.name,
+                        anomaly_type="renewable_drop",
+                        anomaly_score=score,
+                        severity=severity_from_score(score),
+                        observed_value=observed,
+                        expected_value=expected,
+                        residual=observed - expected,
+                        threshold=self.config.renewable_drop_threshold,
+                        explanation=(
+                            f"Daylight solar generation remained at least {relative_drop:.1%} "
+                            f"below {expected:.1f} MW for {duration} consecutive hours."
+                        ),
+                        metadata={
+                            "drop_start_utc": format_utc_timestamp(start_timestamp),
+                            "drop_end_utc": format_utc_timestamp(end_timestamp),
+                            "duration_hours": duration,
+                            "supporting_observation_count": duration,
+                            "radiation_threshold_wm2": (
+                                self.config.solar_daylight_radiation_threshold_wm2
+                            ),
+                            "minimum_expected_generation_mw": (
+                                self.config.solar_min_expected_generation_mw
+                            ),
+                            "minimum_absolute_drop_mw": self.config.solar_min_absolute_drop_mw,
+                        },
+                        detected_at=detected_at,
+                    )
+                )
+            position = max(end_position + 1, position + 1)
+        return events
+
     def _flatline_events(
         self,
         group: pd.DataFrame,
@@ -299,14 +401,32 @@ class RuleDetector:
         target: str,
         detected_at: pd.Timestamp,
     ) -> list[dict[str, object]]:
-        runs = (
-            values.ne(values.shift()) | group["timestamp_utc"].diff().ne(pd.Timedelta(hours=1))
-        ).cumsum()
+        within_tolerance = values.diff().abs().le(self.config.flatline_tolerance)
+        consecutive = group["timestamp_utc"].diff().eq(pd.Timedelta(hours=1))
+        runs = (~(within_tolerance & consecutive)).cumsum()
         events: list[dict[str, object]] = []
         for _, positions in group.groupby(runs, observed=True).groups.items():
             if len(positions) < self.config.flatline_hours:
                 continue
+            position_list = [int(position) for position in positions]
+            flatline = group.loc[position_list]
+            if target == "solar_generation_mw":
+                first_position = position_list[0]
+                expected = (
+                    float(values.iloc[first_position - 1])
+                    if first_position > 0
+                    else float(values.loc[position_list[0]])
+                )
+                if (
+                    expected < self.config.solar_min_expected_generation_mw
+                    or not flatline.apply(self._solar_daylight, axis=1).all()
+                ):
+                    continue
             last = positions[-1]
+            first = positions[0]
+            start_timestamp = group.loc[first, "timestamp_utc"]
+            end_timestamp = group.loc[last, "timestamp_utc"]
+            duration = len(positions)
             events.append(
                 make_anomaly(
                     region=region,
@@ -318,12 +438,36 @@ class RuleDetector:
                     severity="warning",
                     observed_value=self._finite_or_none(values.loc[last]),
                     threshold=float(self.config.flatline_hours),
-                    explanation=f"Value is unchanged for {len(positions)} consecutive hours.",
-                    metadata={"duration_hours": len(positions)},
+                    explanation=(
+                        f"Value remained within {self.config.flatline_tolerance:g} for "
+                        f"{duration} consecutive hourly observations."
+                    ),
+                    metadata={
+                        "flatline_start_utc": format_utc_timestamp(start_timestamp),
+                        "flatline_end_utc": format_utc_timestamp(end_timestamp),
+                        "duration_hours": duration,
+                        "supporting_observation_count": duration,
+                        "tolerance": self.config.flatline_tolerance,
+                        "minimum_required_hours": self.config.flatline_hours,
+                    },
                     detected_at=detected_at,
                 )
             )
         return events
+
+    def _solar_daylight(self, row: pd.Series) -> bool:
+        if (
+            "daylight_indicator" in row.index
+            and pd.notna(row["daylight_indicator"])
+            and not bool(row["daylight_indicator"])
+        ):
+            return False
+        if "shortwave_radiation_wm2" not in row.index or pd.isna(row["shortwave_radiation_wm2"]):
+            return False
+        return (
+            float(row["shortwave_radiation_wm2"])
+            >= self.config.solar_daylight_radiation_threshold_wm2
+        )
 
     def _weather_range_events(
         self, group: pd.DataFrame, region: str, target: str, detected_at: pd.Timestamp

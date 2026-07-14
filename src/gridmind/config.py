@@ -116,6 +116,35 @@ class Settings(BaseSettings):
         default=0.30, ge=0.0, alias="RENEWABLE_DROP_PCT_THRESHOLD"
     )
     flatline_hours: int = Field(default=4, gt=0, alias="FLATLINE_HOURS")
+    flatline_tolerance: float = Field(default=0.0, ge=0.0, alias="FLATLINE_TOLERANCE")
+    solar_daylight_radiation_threshold_wm2: float = Field(
+        default=25.0, ge=0.0, alias="SOLAR_DAYLIGHT_RADIATION_THRESHOLD_WM2"
+    )
+    solar_min_expected_generation_mw: float = Field(
+        default=100.0, ge=0.0, alias="SOLAR_MIN_EXPECTED_GENERATION_MW"
+    )
+    solar_min_absolute_drop_mw: float = Field(
+        default=100.0, ge=0.0, alias="SOLAR_MIN_ABSOLUTE_DROP_MW"
+    )
+    solar_min_drop_duration_hours: int = Field(
+        default=2, gt=0, alias="SOLAR_MIN_DROP_DURATION_HOURS"
+    )
+    isolation_demand_score_quantile: float = Field(
+        default=0.995, gt=0.5, lt=1.0, alias="ISOLATION_DEMAND_SCORE_QUANTILE"
+    )
+    isolation_solar_score_quantile: float = Field(
+        default=0.995, gt=0.5, lt=1.0, alias="ISOLATION_SOLAR_SCORE_QUANTILE"
+    )
+    isolation_wind_score_quantile: float = Field(
+        default=0.995, gt=0.5, lt=1.0, alias="ISOLATION_WIND_SCORE_QUANTILE"
+    )
+    isolation_net_load_score_quantile: float = Field(
+        default=0.999, gt=0.5, lt=1.0, alias="ISOLATION_NET_LOAD_SCORE_QUANTILE"
+    )
+    isolation_extreme_score_quantile: float = Field(
+        default=0.9995, gt=0.5, lt=1.0, alias="ISOLATION_EXTREME_SCORE_QUANTILE"
+    )
+    anomaly_max_rate: float = Field(default=0.10, gt=0.0, le=1.0, alias="ANOMALY_MAX_RATE")
     missing_hour_warning_count: int = Field(default=1, gt=0, alias="MISSING_HOUR_WARNING_COUNT")
     missing_hour_critical_count: int = Field(default=3, gt=0, alias="MISSING_HOUR_CRITICAL_COUNT")
     alert_dedup_window_hours: int = Field(default=6, gt=0, alias="ALERT_DEDUP_WINDOW_HOURS")
@@ -166,6 +195,16 @@ class Settings(BaseSettings):
             raise ValueError("RESIDUAL_MAD_CRITICAL must exceed its warning threshold.")
         if self.missing_hour_critical_count <= self.missing_hour_warning_count:
             raise ValueError("MISSING_HOUR_CRITICAL_COUNT must exceed its warning count.")
+        operational_quantiles = (
+            self.isolation_demand_score_quantile,
+            self.isolation_solar_score_quantile,
+            self.isolation_wind_score_quantile,
+            self.isolation_net_load_score_quantile,
+        )
+        if self.isolation_extreme_score_quantile <= max(operational_quantiles):
+            raise ValueError(
+                "ISOLATION_EXTREME_SCORE_QUANTILE must exceed every target score quantile."
+            )
         return self
 
     def require_eia_api_key(self) -> str:

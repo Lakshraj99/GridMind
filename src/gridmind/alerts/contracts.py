@@ -40,11 +40,60 @@ HISTORY_COLUMNS = [
     "anomaly_id",
     "metadata_json",
 ]
+MEANINGFUL_ALERT_COLUMNS = [
+    "status",
+    "severity",
+    "first_seen_utc",
+    "last_seen_utc",
+    "occurrence_count",
+    "latest_anomaly_id",
+    "title",
+    "summary",
+    "acknowledged_at_utc",
+    "resolved_at_utc",
+    "metadata_json",
+]
 
 
 def deterministic_alert_id(region: str, target: str, anomaly_type: str, first_seen: object) -> str:
     material = f"{region}|{target}|{anomaly_type}|{format_utc_timestamp(first_seen)}"
     return hashlib.sha256(material.encode()).hexdigest()[:32]
+
+
+def normalized_alert_state(alert: dict[str, object]) -> dict[str, object]:
+    """Return only business-state fields in stable JSON-comparable form."""
+    normalized: dict[str, object] = {}
+    timestamp_columns = {
+        "first_seen_utc",
+        "last_seen_utc",
+        "acknowledged_at_utc",
+        "resolved_at_utc",
+    }
+    for column in MEANINGFUL_ALERT_COLUMNS:
+        value = alert.get(column)
+        if column in timestamp_columns:
+            normalized[column] = (
+                format_utc_timestamp(value)
+                if not pd.Series([value], dtype="object").isna().iloc[0]
+                else None
+            )
+        elif column == "occurrence_count":
+            normalized[column] = int(str(value)) if value is not None else 0
+        elif column == "metadata_json":
+            normalized[column] = json.dumps(
+                json.loads(str(value or "{}")), sort_keys=True, separators=(",", ":")
+            )
+        else:
+            normalized[column] = value
+    return normalized
+
+
+def alert_state_fingerprint(alert: dict[str, object] | None) -> str:
+    """Hash normalized persisted state, intentionally excluding ``updated_at_utc``."""
+    if alert is None:
+        return "none"
+    payload = json.dumps(normalized_alert_state(alert), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def validate_alert_frame(frame: pd.DataFrame) -> pd.DataFrame:

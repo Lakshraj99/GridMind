@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -24,6 +25,12 @@ def test_anomaly_configuration_defaults_and_threshold_validation() -> None:
         Settings(RESIDUAL_ZSCORE_WARNING=4, RESIDUAL_ZSCORE_CRITICAL=3, _env_file=None)
     with pytest.raises(ValidationError):
         Settings(MISSING_HOUR_WARNING_COUNT=3, MISSING_HOUR_CRITICAL_COUNT=3, _env_file=None)
+    with pytest.raises(ValidationError):
+        Settings(
+            ISOLATION_NET_LOAD_SCORE_QUANTILE=0.999,
+            ISOLATION_EXTREME_SCORE_QUANTILE=0.99,
+            _env_file=None,
+        )
 
 
 def test_rules_detect_timestamp_value_change_flatline_and_weather_anomalies() -> None:
@@ -94,10 +101,23 @@ def test_rules_isolate_regions_and_detect_renewable_drop_and_staleness() -> None
         ignore_index=True,
     )
     result = RuleDetector(
-        RuleConfig(renewable_drop_threshold=0.30, flatline_hours=3, stale_after_hours=2)
+        RuleConfig(
+            renewable_drop_threshold=0.30,
+            flatline_hours=3,
+            stale_after_hours=2,
+            solar_min_expected_generation_mw=10,
+            solar_min_absolute_drop_mw=10,
+        )
     ).detect(
         frame,
         target="solar_generation_mw",
+        weather=pd.DataFrame(
+            {
+                "region": ["PJM"] * 8 + ["MISO"] * 8,
+                "timestamp_utc": list(timestamps) * 2,
+                "shortwave_radiation_wm2": 100.0,
+            }
+        ),
         now=pd.Timestamp("2026-01-02T00:00:00Z"),
     )
     missing = result.loc[result["anomaly_type"] == "missing_timestamp"]
@@ -107,6 +127,80 @@ def test_rules_isolate_regions_and_detect_renewable_drop_and_staleness() -> None
         "PJM",
         "MISO",
     }
+
+
+def test_solar_drop_rules_are_daylight_aware_and_require_duration() -> None:
+    timestamps = pd.date_range("2026-06-01T10:00:00Z", periods=4, freq="h")
+    detector = RuleDetector(
+        RuleConfig(
+            renewable_drop_threshold=0.30,
+            solar_daylight_radiation_threshold_wm2=25,
+            solar_min_expected_generation_mw=100,
+            solar_min_absolute_drop_mw=100,
+            solar_min_drop_duration_hours=2,
+            flatline_hours=10,
+            stale_after_hours=100,
+        )
+    )
+
+    def detect(values: list[float], radiation: list[float]) -> pd.DataFrame:
+        frame = pd.DataFrame(
+            {"region": "PJM", "timestamp_utc": timestamps, "solar_generation_mw": values}
+        )
+        weather = pd.DataFrame(
+            {
+                "region": "PJM",
+                "timestamp_utc": timestamps,
+                "shortwave_radiation_wm2": radiation,
+                "daylight_indicator": [value >= 25 for value in radiation],
+            }
+        )
+        return detector.detect(
+            frame,
+            target="solar_generation_mw",
+            weather=weather,
+            now=timestamps[-1],
+        )
+
+    assert "renewable_drop" not in set(detect([500, 250, 240, 230], [0, 0, 0, 0])["anomaly_type"])
+    assert "renewable_drop" not in set(
+        detect([500, 250, 240, 230], [200, 20, 0, 0])["anomaly_type"]
+    )
+    assert "renewable_drop" not in set(
+        detect([500, 250, 500, 500], [100, 50, 100, 100])["anomaly_type"]
+    )
+    cloudy = detect([500, 250, 240, 230], [100, 50, 45, 40])
+    drop = cloudy.loc[cloudy["anomaly_type"] == "renewable_drop"]
+    assert len(drop) == 1
+    assert json.loads(drop.iloc[0]["metadata_json"])["duration_hours"] == 3
+
+
+def test_flatline_requires_four_hourly_observations_and_records_support() -> None:
+    detector = RuleDetector(RuleConfig(flatline_hours=4, flatline_tolerance=0.1))
+    timestamps = pd.date_range("2026-01-01", periods=4, freq="h", tz="UTC")
+
+    def detect(values: list[float]) -> pd.DataFrame:
+        return detector.detect(
+            pd.DataFrame(
+                {
+                    "region": "PJM",
+                    "timestamp_utc": timestamps[: len(values)],
+                    "demand_mw": values,
+                }
+            ),
+            target="demand_mw",
+            now=timestamps[-1],
+        )
+
+    assert "flatline" not in set(detect([100.0, 100.05, 100.0])["anomaly_type"])
+    flatline = detect([100.0, 100.05, 100.0, 100.05])
+    event = flatline.loc[flatline["anomaly_type"] == "flatline"].iloc[0]
+    metadata = json.loads(event["metadata_json"])
+    assert metadata["supporting_observation_count"] == 4
+    assert metadata["duration_hours"] == 4
+    assert metadata["minimum_required_hours"] == 4
+    assert metadata["tolerance"] == 0.1
+    assert "4 consecutive hourly observations" in event["explanation"]
 
 
 def test_rules_detect_demand_renewable_and_forecast_weather_coverage() -> None:

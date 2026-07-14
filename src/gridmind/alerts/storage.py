@@ -47,6 +47,10 @@ class AlertStorage:
                 f"CREATE INDEX IF NOT EXISTS alert_lookup_idx ON {self.alert_table} "
                 "(region, target, status, severity)"
             )
+            connection.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS alert_history_id_idx "
+                f"ON {self.history_table} (history_id)"
+            )
 
     def upsert_alerts(self, frame: pd.DataFrame) -> int:
         valid = validate_alert_frame(frame)
@@ -60,7 +64,15 @@ class AlertStorage:
             return len(self.read_history())
         valid = frame[HISTORY_COLUMNS].copy()
         valid["changed_at_utc"] = pd.to_datetime(valid["changed_at_utc"], utc=True)
-        self._replace(self.history_table, valid, HISTORY_COLUMNS, "history_id")
+        with connect_duckdb(self.path) as connection:
+            connection.register("incoming_alert_history", valid)
+            names = ", ".join(HISTORY_COLUMNS)
+            connection.execute(
+                f"INSERT INTO {self.history_table} ({names}) "
+                f"SELECT {names} FROM incoming_alert_history AS source "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {self.history_table} AS target "
+                "WHERE target.history_id = source.history_id)"
+            )
         return len(self.read_history())
 
     def _replace(

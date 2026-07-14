@@ -520,7 +520,19 @@ def detect_anomalies_command(
     typer.echo(f"Anomalies found: {len(result.anomalies):,}")
     typer.echo(f"Severity counts: {severity_counts}")
     typer.echo(f"Detector counts: {detector_counts}")
-    typer.echo(f"Alerts opened: {result.alerts_opened}; updated: {result.alerts_updated}")
+    typer.echo(
+        "Alert lifecycle: "
+        f"opened={result.alerts_opened}; updated={result.alerts_updated}; "
+        f"unchanged={result.alerts_unchanged}; "
+        f"acknowledged={result.lifecycle_counts['acknowledged']}; "
+        f"resolved={result.lifecycle_counts['resolved']}; "
+        f"suppressed={result.lifecycle_counts['suppressed']}; "
+        f"auto_resolved={result.alerts_auto_resolved}"
+    )
+    for target, report in result.detector_report.items():
+        warning = report.get("isolation_calibration", {}).get("calibration_warning")
+        if warning:
+            typer.echo(f"Calibration warning for {target}: {warning}", err=True)
     typer.echo(f"Artifacts: {result.artifact_dir}")
 
 

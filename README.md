@@ -108,6 +108,12 @@ Register for an [EIA API key](https://www.eia.gov/opendata/register.php), then s
 | `MISSING_DEMAND_POLICY` | Missing actual demand: `error` or `drop` | `error` |
 | `ANOMALY_LOOKBACK_HOURS` / `ANOMALY_MIN_TRAINING_ROWS` | Chronological detector history | `720` / `336` |
 | `ANOMALY_CONTAMINATION` / `ANOMALY_RANDOM_SEED` | IsolationForest configuration | `0.01` / `42` |
+| `ISOLATION_*_SCORE_QUANTILE` | Per-target demand/solar/wind/net-load score cutoffs | `0.995` / `0.995` / `0.995` / `0.999` |
+| `ISOLATION_EXTREME_SCORE_QUANTILE` / `ANOMALY_MAX_RATE` | Standalone warning cutoff / calibration guard | `0.9995` / `0.10` |
+| `FLATLINE_HOURS` / `FLATLINE_TOLERANCE` | Consecutive support and numeric equality tolerance | `4` / `0` |
+| `SOLAR_DAYLIGHT_RADIATION_THRESHOLD_WM2` | Radiation required for solar operational rules | `25` |
+| `SOLAR_MIN_EXPECTED_GENERATION_MW` / `SOLAR_MIN_ABSOLUTE_DROP_MW` | Solar drop eligibility gates | `100` / `100` |
+| `SOLAR_MIN_DROP_DURATION_HOURS` | Consecutive daylight underproduction required | `2` |
 | `ALERT_DEDUP_WINDOW_HOURS` / `ALERT_AUTO_RESOLVE_HOURS` | Alert lifecycle windows | `6` / `24` |
 | `ANOMALY_EXPERIMENT_NAME` | MLflow anomaly experiment | `gridmind-anomaly-detection` |
 
@@ -410,7 +416,11 @@ flowchart TD
 The rule detector checks missing, duplicate, non-monotonic and unexpected hourly timestamps;
 invalid signs and non-finite measurements; impossible humidity, cloud, and radiation ranges;
 abrupt demand/renewable changes; flatlines; stale data; and grid/weather coverage mismatches.
-Rules never interpolate or mutate source data.
+Rules never interpolate or mutate source data. Solar drop and flatline rules require measured
+daylight radiation, sufficient expected production, an absolute and relative loss, and the
+configured consecutive duration, so normal darkness and sunset ramps are not incidents. A
+four-hour flatline means four consecutive hourly observations within the configured tolerance;
+the supporting start, end, count, duration, tolerance, and minimum are retained in event metadata.
 
 The residual detector aligns each actual with the latest stored forecast whose origin is strictly
 earlier than the target timestamp. Rolling mean, standard deviation, median, MAD, z-score, and
@@ -423,6 +433,10 @@ models. Training data chronologically precedes scoring data; incomplete feature 
 and excluded rather than imputed. Bundles and schemas record their regional training cutoff.
 Feature-deviation summaries describe association only—they are not causal explanations. The
 configured contamination is an algorithm parameter, not evidence of real anomaly prevalence.
+Each target has its own training-score quantile and recorded fitted/scoring score distributions.
+Standalone detections remain informational unless they exceed the separate extreme quantile;
+independent detector agreement can elevate the ensemble. The maximum-rate guard reports excessive
+flagging for calibration review without suppressing observations or calling them failures.
 
 ### Ensemble and severity
 
@@ -442,7 +456,11 @@ state, while `alert_history` preserves every opening, occurrence, acknowledgemen
 manual resolution, and healthy-period automatic resolution. Repeated anomalies inside
 `ALERT_DEDUP_WINDOW_HOURS` increment occurrence count; severity may escalate but an active
 critical alert is never automatically downgraded. Reprocessing the same anomaly identifier is
-idempotent. All tables and queries use UTC DuckDB sessions.
+idempotent. Alert history is written only for committed meaningful state changes; `updated_at_utc`
+alone is excluded from state fingerprints, and deterministic history identifiers make duplicate
+insertion a no-op. CLI lifecycle counts distinguish opened, updated, unchanged, acknowledged,
+resolved, suppressed, and auto-resolved transitions. All tables and queries use UTC DuckDB
+sessions.
 
 ### Commands
 
@@ -472,8 +490,10 @@ flatline, missing hours, weather corruption, gradual drift, and contextual anoma
 copy of historical data. They report precision, recall, F1, delay, false positives per day,
 severity accuracy, and per-type recall under `artifacts/anomaly_backtests/<timestamp>/`. Original
 Parquet and DuckDB observations are never changed. Detection outputs, detector schema, thresholds,
-events, and alert summaries are stored under `artifacts/anomalies/<timestamp>/`, outside all
-partitioned data directories.
+events, alert summaries, `anomaly_rate_report.csv`, and `lifecycle_summary.json` are stored under
+`artifacts/anomalies/<timestamp>/`, outside all partitioned data directories. The anomaly-rate
+report groups UTC-day event counts and rates by target, detector, type, and severity and includes
+lifecycle outcomes and effective IsolationForest rates.
 
 When enabled, MLflow experiment `gridmind-anomaly-detection` logs date/region/target scope,
 thresholds, IsolationForest parameters, training/excluded rows, metrics, detector bundle, feature
