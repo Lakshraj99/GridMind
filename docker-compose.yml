@@ -1,0 +1,39 @@
+services:
+  gridmind-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      DUCKDB_PATH: /app/data/gridmind.duckdb
+      DATA_DIR: /app/data
+      DATA_QUALITY_DIR: /app/artifacts/data_quality
+      MLFLOW_TRACKING_URI: sqlite:////app/mlflow/mlflow.db
+      MLFLOW_ARTIFACT_ROOT: /app/mlartifacts
+      API_KEY_ENABLED: ${API_KEY_ENABLED:-false}
+      GRIDMIND_API_KEY: ${GRIDMIND_API_KEY:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+      - ./mlartifacts:/app/mlartifacts
+      - ./mlflow-storage:/app/mlflow
+      - ./configs:/app/configs:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  gridmind-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    environment:
+      DASHBOARD_API_BASE_URL: http://gridmind-api:8000
+      GRIDMIND_API_KEY: ${GRIDMIND_API_KEY:-}
+    ports:
+      - "8501:8501"
+    depends_on:
+      gridmind-api:
+        condition: service_healthy

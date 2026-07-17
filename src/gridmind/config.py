@@ -5,6 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -30,6 +31,34 @@ class Settings(BaseSettings):
     mlflow_tracking_uri: str = Field(default="sqlite:///mlflow.db", alias="MLFLOW_TRACKING_URI")
     mlflow_artifact_root: Path = Field(default=Path("mlartifacts"), alias="MLFLOW_ARTIFACT_ROOT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    log_format: Literal["json", "text"] = Field(default="json", alias="LOG_FORMAT")
+    api_enabled: bool = Field(default=True, alias="API_ENABLED")
+    api_host: str = Field(default="0.0.0.0", alias="API_HOST")
+    api_port: int = Field(default=8000, ge=1, le=65535, alias="API_PORT")
+    api_workers: int = Field(default=1, gt=0, alias="API_WORKERS")
+    api_title: str = Field(default="GridMind API", min_length=1, alias="API_TITLE")
+    api_version: str = Field(default="0.6.0", min_length=1, alias="API_VERSION")
+    api_root_path: str = Field(default="", alias="API_ROOT_PATH")
+    api_cors_origins: Annotated[tuple[str, ...], NoDecode] = Field(
+        default=("http://localhost:8501",), alias="API_CORS_ORIGINS"
+    )
+    api_key_enabled: bool = Field(default=False, alias="API_KEY_ENABLED")
+    gridmind_api_key: str | None = Field(
+        default=None, alias="GRIDMIND_API_KEY", exclude=True, repr=False
+    )
+    api_default_page_size: int = Field(default=50, gt=0, alias="API_DEFAULT_PAGE_SIZE")
+    api_max_page_size: int = Field(default=500, gt=0, alias="API_MAX_PAGE_SIZE")
+    api_cache_ttl_seconds: float = Field(default=30.0, ge=0, alias="API_CACHE_TTL_SECONDS")
+    metrics_enabled: bool = Field(default=True, alias="METRICS_ENABLED")
+    dashboard_enabled: bool = Field(default=True, alias="DASHBOARD_ENABLED")
+    dashboard_host: str = Field(default="0.0.0.0", alias="DASHBOARD_HOST")
+    dashboard_port: int = Field(default=8501, ge=1, le=65535, alias="DASHBOARD_PORT")
+    dashboard_api_base_url: str = Field(
+        default="http://localhost:8000", alias="DASHBOARD_API_BASE_URL"
+    )
+    dashboard_request_timeout_seconds: float = Field(
+        default=15.0, gt=0, alias="DASHBOARD_REQUEST_TIMEOUT_SECONDS"
+    )
     missing_demand_policy: Literal["error", "drop"] = Field(
         default="error", alias="MISSING_DEMAND_POLICY"
     )
@@ -240,8 +269,37 @@ class Settings(BaseSettings):
             raise ValueError(f"RENEWABLE_TARGETS must contain only {sorted(allowed)}.")
         return parsed
 
+    @field_validator("api_cors_origins", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, value: object) -> tuple[str, ...]:
+        if isinstance(value, str):
+            origins = tuple(item.strip() for item in value.split(",") if item.strip())
+        elif isinstance(value, (list, tuple, set)):
+            origins = tuple(str(item).strip() for item in value if str(item).strip())
+        else:
+            raise ValueError("API_CORS_ORIGINS must be a comma-separated list.")
+        if not origins:
+            raise ValueError("API_CORS_ORIGINS must contain at least one origin.")
+        for origin in origins:
+            parsed = urlparse(origin)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or parsed.path
+                not in {
+                    "",
+                    "/",
+                }
+            ):
+                raise ValueError(f"Invalid CORS origin: {origin}")
+        return origins
+
     @model_validator(mode="after")
     def _validate_anomaly_threshold_order(self) -> Settings:
+        if self.api_max_page_size < self.api_default_page_size:
+            raise ValueError("API_MAX_PAGE_SIZE must be at least API_DEFAULT_PAGE_SIZE.")
+        if self.api_key_enabled and not self.gridmind_api_key:
+            raise ValueError("GRIDMIND_API_KEY is required when API_KEY_ENABLED=true.")
         if self.residual_zscore_critical <= self.residual_zscore_warning:
             raise ValueError("RESIDUAL_ZSCORE_CRITICAL must exceed its warning threshold.")
         if self.residual_mad_critical <= self.residual_mad_warning:

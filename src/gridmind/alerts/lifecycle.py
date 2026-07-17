@@ -112,6 +112,8 @@ class AlertManager:
             raise AlertLifecycleError(f"Alert '{alert_id}' was not found.")
         timestamp = to_utc_timestamp(now or pd.Timestamp.now(tz=UTC))
         previous = {str(key): value for key, value in selected.iloc[0].to_dict().items()}
+        if str(previous["status"]) == status:
+            return pd.Series(previous)
         proposed = previous.copy()
         proposed["status"] = status
         if status == "acknowledged":

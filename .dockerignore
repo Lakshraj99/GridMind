@@ -12,3 +12,7 @@ artifacts
 mlruns
 mlartifacts
 *.duckdb
+*.db
+coverage.xml
+htmlcov
+mlruns_backup

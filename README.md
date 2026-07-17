@@ -6,10 +6,11 @@ Parquet/DuckDB storage, deterministic baselines, weather-aware LightGBM/CatBoost
 renewable and net-load targets, Optuna, SHAP, MLflow Model Registry, and idempotent predictions.
 Milestone 4 adds a production-quality three-layer anomaly and alerting workflow. Milestone 5 adds
 forecast-aligned battery dispatch optimization and rolling decision-support simulation while
-preserving all earlier interfaces.
+preserving all earlier interfaces. Milestone 6 adds a local FastAPI serving layer and Streamlit
+decision-support dashboard without adding operational control.
 
-GridMind still deliberately contains **no physical battery control, SCADA integration, online
-API, dashboard, Kafka, Kubernetes, cloud infrastructure, or live dispatch commands**.
+GridMind deliberately contains **no physical battery control, SCADA integration, Kafka,
+Kubernetes, cloud infrastructure, public multi-tenant hosting, or live dispatch commands**.
 
 ## Architecture
 
@@ -61,6 +62,10 @@ src/gridmind/          Python package
   anomalies/           Rules, residuals, IsolationForest, ensemble, severity, evaluation
   alerts/              Alert contracts, lifecycle, DuckDB persistence
   optimization/        Battery physics, HiGHS MILP, baselines, simulation, metrics, storage
+  services/            Filtered, paginated application queries and lifecycle operations
+  api/                 FastAPI routes, auth, health, errors, middleware
+  dashboard/           Streamlit views and typed HTTP API client
+  observability/       Structured JSON logging and Prometheus metrics
   pipelines/           Ingest, baseline, train, predict, and explain orchestration
 tests/                 Offline unit and integration tests
 data/raw/              Ignored raw API snapshots
@@ -110,6 +115,12 @@ Register for an [EIA API key](https://www.eia.gov/opendata/register.php), then s
 | `MODEL_PROMOTION_THRESHOLD` | Minimum relative baseline improvement | `0.0` |
 | `SHAP_SAMPLE_SIZE` | Maximum deterministic explanation sample | `2000` |
 | `LOG_LEVEL` | Python logging level | `INFO` |
+| `LOG_FORMAT` / `METRICS_ENABLED` | JSON/text logging and Prometheus endpoint | `json` / `true` |
+| `API_HOST` / `API_PORT` / `API_WORKERS` | Uvicorn bind and workers | `0.0.0.0` / `8000` / `1` |
+| `API_KEY_ENABLED` / `GRIDMIND_API_KEY` | Optional local `X-API-Key` auth | `false` / none |
+| `API_DEFAULT_PAGE_SIZE` / `API_MAX_PAGE_SIZE` | Offset-page bounds | `50` / `500` |
+| `API_CORS_ORIGINS` | Exact origins allowed by CORS | `http://localhost:8501` |
+| `DASHBOARD_API_BASE_URL` | FastAPI URL used by Streamlit | `http://localhost:8000` |
 | `MISSING_DEMAND_POLICY` | Missing actual demand: `error` or `drop` | `error` |
 | `ANOMALY_LOOKBACK_HOURS` / `ANOMALY_MIN_TRAINING_ROWS` | Chronological detector history | `720` / `336` |
 | `ANOMALY_CONTAMINATION` / `ANOMALY_RANDOM_SEED` | IsolationForest configuration | `0.01` / `42` |
@@ -604,6 +615,103 @@ guaranteed savings or dispatch instructions. Oracle results are non-deployable. 
 network power flow, interconnection, telemetry latency, ancillary services, regulatory rules, and
 detailed electrochemical degradation are not fully modelled.
 
+## Milestone 6: local application layer
+
+The API exposes persisted forecasts, anomaly detections, alert lifecycle state, simulated battery
+dispatches, and safe MLflow Registry metadata. It cannot train a model, run an optimization, read
+arbitrary files, execute arbitrary SQL, or control infrastructure. Route functions contain no SQL;
+they use reusable services with parameterized queries and short-lived UTC DuckDB connections.
+
+```mermaid
+flowchart LR
+    Caller["Authenticated client"] --> RequestID["Request ID + metrics middleware"]
+    RequestID --> Auth["Constant-time X-API-Key check"]
+    Auth --> Router["FastAPI /api/v1 router"]
+    Router --> Service["Application service"]
+    Service --> DuckDB["Short-lived UTC DuckDB connection"]
+    Service --> MLflow["Read-only MLflow metadata"]
+    Router --> Envelope["UTC JSON or standard error envelope"]
+```
+
+```mermaid
+flowchart LR
+    Browser["Operator browser"] --> Streamlit["Streamlit pages"]
+    Streamlit --> Client["Typed httpx client"]
+    Client --> API["GridMind FastAPI"]
+    API --> Persisted["Persisted decision-support records"]
+    Persisted --> API --> Streamlit
+```
+
+Start both processes during local development:
+
+```bash
+gridmind-api
+gridmind-dashboard
+```
+
+OpenAPI is at `http://localhost:8000/docs`. Liveness is public; readiness checks local DuckDB,
+the required forecast table, the artifact directory, configuration, and configured MLflow backend
+without calling EIA or Open-Meteo. `/metrics` serves Prometheus text when enabled. Application logs
+carry a UTC timestamp, request ID, method, path, status, and duration, while shared redaction removes
+configured keys.
+
+Authentication is optional for local development. Set `API_KEY_ENABLED=true` and a non-empty
+`GRIDMIND_API_KEY` to require `X-API-Key` on `/api/v1`. The dashboard reads the same environment
+value and never displays it. These examples contain placeholders only:
+
+```bash
+curl http://localhost:8000/health/live
+curl -H 'X-API-Key: replace-with-a-local-key' \
+  'http://localhost:8000/api/v1/forecasts/latest?region=PJM&target=demand_mw&horizon=24'
+curl -X PATCH -H 'Content-Type: application/json' \
+  -H 'X-API-Key: replace-with-a-local-key' \
+  -d '{"status":"acknowledged"}' \
+  http://localhost:8000/api/v1/alerts/ALERT_ID
+```
+
+Every collection uses bounded `limit`/`offset` pagination with an accurate filtered total.
+Forecasts expose stored lineage; anomalies are labelled for human review; repeated no-op alert
+transitions do not add history; dispatch responses expose SOC, physics checks, objectives, and
+lineage for simulations only. Model responses omit artifact paths and filesystem access.
+
+The wide Streamlit dashboard contains Overview, Forecasts, Anomalies, Alerts, Battery dispatch,
+and Models workspaces. Plotly views use only API responses—the dashboard never opens DuckDB.
+Empty responses, API failures, and authentication failures are displayed, and alert changes require
+confirmation.
+
+### Docker Compose
+
+```mermaid
+flowchart LR
+    Host["localhost:8501"] --> Dashboard["gridmind-dashboard<br/>non-root"]
+    Dashboard -->|"internal HTTP"| API["gridmind-api<br/>non-root"]
+    HostAPI["localhost:8000"] --> API
+    API --> Data["mounted data/"]
+    API --> Artifacts["mounted artifacts/"]
+    API --> Registry["mounted SQLite + mlartifacts/"]
+```
+
+```bash
+docker compose up --build
+```
+
+The Python 3.11 slim images use non-root users, health checks, separate services, and mounted data,
+configuration, artifact, and MLflow storage. `.env` is excluded from build contexts and secrets are
+supplied only at runtime. The dashboard waits for API readiness through the internal network. The
+MLflow UI is not exposed.
+
+### Dashboard screenshots
+
+Screenshot placeholders: overview, forecast exploration, anomaly review, alert lifecycle, battery
+simulation, and model registry. Capture these from representative local data; the application does
+not hardcode or fabricate production results.
+
+Local API-key authentication is not a complete enterprise identity system. Production would
+require TLS, managed secret storage and rotation, external authentication and authorization,
+backups, network controls, resource limits, and audit retention. This is decision-support software:
+anomalies are not confirmed incidents, battery dispatches are simulations, and no endpoint controls
+batteries or grid infrastructure.
+
 ## Testing and quality
 
 Tests use `httpx.MockTransport` and the checked-in JSON fixture; they never call EIA.
@@ -673,9 +781,10 @@ not distributed concurrent writers. MASE currently uses first-difference actuals
 evaluated sample as its scaling series. No negative-output clamp is enabled; invalid model
 output fails explicitly.
 
-Milestones 1–5 now cover ingestion, deterministic and ML forecasting, weather/renewable/net-load
-targets, anomaly detection, local alert lifecycle management, and simulated battery dispatch.
+Milestones 1–6 now cover ingestion, deterministic and ML forecasting, weather/renewable/net-load
+targets, anomaly detection, local alert lifecycle management, simulated battery dispatch, and a
+local authenticated serving/dashboard layer.
 Future work may add probabilistic forecasts, calibrated real-incident evaluation, richer market
-and network constraints, and operator-supplied asset models. Physical control, online delivery,
-serving, dashboards, and cloud infrastructure remain out of scope until explicit safety,
+and network constraints, and operator-supplied asset models. Physical control, online notification
+delivery, enterprise identity, and cloud infrastructure remain out of scope until explicit safety,
 reliability, regulatory, and operational requirements exist.

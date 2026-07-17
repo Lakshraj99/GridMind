@@ -22,6 +22,7 @@ mlruns/
 mlruns_backup/
 mlartifacts/
 mlflow.db
+mlflow-storage/
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !artifacts/.gitkeep

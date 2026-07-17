@@ -37,9 +37,14 @@ class BatteryDispatchStorage:
                     total_discharge_mwh DOUBLE, estimated_cost DOUBLE,
                     degradation_cost DOUBLE, created_at_utc TIMESTAMPTZ,
                     configuration_json VARCHAR, lineage_json VARCHAR,
-                    artifact_path VARCHAR, mlflow_run_id VARCHAR
+                    artifact_path VARCHAR, mlflow_run_id VARCHAR,
+                    objective_breakdown_json VARCHAR
                 )
                 """
+            )
+            connection.execute(
+                f"ALTER TABLE {self.run_table} ADD COLUMN IF NOT EXISTS "
+                "objective_breakdown_json VARCHAR"
             )
             connection.execute(
                 f"""
@@ -119,6 +124,9 @@ class BatteryDispatchStorage:
                     "lineage_json": json.dumps(result.lineage, sort_keys=True, default=str),
                     "artifact_path": str(artifact_path or ""),
                     "mlflow_run_id": mlflow_run_id or "",
+                    "objective_breakdown_json": json.dumps(
+                        result.objective_breakdown, sort_keys=True, default=str
+                    ),
                 }
             ]
         )

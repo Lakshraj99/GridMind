@@ -103,3 +103,11 @@ class AlertLifecycleError(GridMindError):
 
 class BatteryOptimizationError(GridMindError):
     """Raised when battery dispatch inputs, solving, or validation fail safely."""
+
+
+class ResourceNotFoundError(GridMindError):
+    """Raised when an application resource cannot be found."""
+
+
+class ServiceUnavailableError(GridMindError):
+    """Raised when an application dependency is unavailable."""
