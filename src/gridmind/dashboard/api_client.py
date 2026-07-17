@@ -37,11 +37,19 @@ class GridMindAPIClient:
             base_url=base_url.rstrip("/"), headers=headers, timeout=timeout, transport=transport
         )
         self.get_retries = get_retries
+        self._get_cache: dict[tuple[str, tuple[tuple[str, str], ...]], dict[str, Any]] = {}
 
     def close(self) -> None:
         self.client.close()
 
     def get(self, path: str, **params: object) -> dict[str, Any]:
+        serialized = tuple(
+            sorted((key, str(value)) for key, value in params.items() if value is not None)
+        )
+        cache_key = (path, serialized)
+        cached = self._get_cache.get(cache_key)
+        if cached is not None:
+            return cached
         for attempt in range(self.get_retries + 1):
             try:
                 response = self.client.get(
@@ -49,7 +57,9 @@ class GridMindAPIClient:
                 )
                 if response.status_code >= 500 and attempt < self.get_retries:
                     continue
-                return self._decode(response)
+                result = self._decode(response)
+                self._get_cache[cache_key] = result
+                return result
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 if attempt == self.get_retries:
                     raise DashboardConnectionError("GridMind API is unavailable.") from exc
@@ -58,21 +68,32 @@ class GridMindAPIClient:
 
     def patch(self, path: str, payload: dict[str, object]) -> dict[str, Any]:
         try:
-            return self._decode(self.client.patch(path, json=payload))
+            result = self._decode(self.client.patch(path, json=payload))
+            self.clear_cache()
+            return result
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             raise DashboardConnectionError("GridMind API is unavailable.") from exc
 
     @staticmethod
     def _decode(response: httpx.Response) -> dict[str, Any]:
-        if response.status_code == 401:
-            raise DashboardAuthenticationError("Dashboard authentication failed.")
+        if response.status_code in {401, 403}:
+            raise DashboardAuthenticationError(
+                "The API rejected the dashboard credentials. Check local configuration."
+            )
         if response.is_error:
             try:
                 message = response.json()["error"]["message"]
             except (KeyError, TypeError, ValueError):
                 message = f"GridMind API returned HTTP {response.status_code}."
             raise DashboardAPIError(str(message))
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise DashboardAPIError("GridMind API returned an invalid response.") from exc
         if not isinstance(data, dict):
             raise DashboardAPIError("GridMind API returned an invalid response.")
         return data
+
+    def clear_cache(self) -> None:
+        """Invalidate safe GET results after a manual refresh or lifecycle write."""
+        self._get_cache.clear()

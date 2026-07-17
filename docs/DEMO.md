@@ -95,6 +95,26 @@ make docker-down
 
 ## 7. Capture portfolio screenshots
 
-After using sanitized local data, capture the dashboard/API views listed in
-[`docs/images/README.md`](images/README.md). Do not capture browser profiles, terminal output,
-filesystem paths, or credentials.
+Use only sanitized, persisted real results. The dashboard will show an empty state when a result is
+unavailable; never replace it with a fabricated value.
+
+1. Start the API and dashboard, confirm `/health/ready` reports ready, and open the dashboard at a
+   browser viewport near 1440 × 900 with 100% zoom.
+2. Keep the sidebar visible, select a region that the API lists as available, and click **Refresh
+   data** immediately before each capture.
+3. For **Overview**, select `PJM` when available. Confirm the forecast, alert, anomaly, model, and
+   battery panels are populated from the API; otherwise document the professional empty state.
+4. For **Forecasts**, select `PJM`, `Demand MW`, `champion`, a 24-hour horizon, and **Latest complete
+   horizon**. Confirm the origin, weather mode, model version, and run ID are visible.
+5. For **Anomalies**, select `PJM`, then use `All` target/severity/detector/type filters. Select a
+   representative persisted detection whose explanation and lineage are available. Do not label an
+   informational IsolationForest detection as an incident.
+6. For **Battery dispatch**, select `PJM` and the latest persisted successful run. Confirm all three
+   charts, solver status, constraint validation, battery specification, and forecast lineage render.
+7. Capture API documentation separately at `http://localhost:8000/docs`; it is intentionally not a
+   Streamlit page.
+8. Review every frame for credentials, local filesystem paths, browser-profile details, terminal
+   output, or other private metadata before saving it under `docs/images/`.
+
+Expected filenames remain documented in [`docs/images/README.md`](images/README.md). GridMind does
+not create screenshots automatically.

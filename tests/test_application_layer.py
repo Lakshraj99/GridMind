@@ -479,14 +479,27 @@ def test_dashboard_pages_render_data_and_empty_states() -> None:
     class UI:
         def __init__(self) -> None:
             self.messages: list[str] = []
+            self.session_state: dict[str, object] = {}
+
+        def __enter__(self) -> UI:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
 
         def __getattr__(self, name: str) -> Any:
             def record(*args: object, **_kwargs: object) -> Any:
                 self.messages.append(f"{name}:{args[0] if args else ''}")
                 if name == "columns":
-                    return [self, self, self]
+                    specification = args[0]
+                    count = specification if isinstance(specification, int) else len(specification)  # type: ignore[arg-type]
+                    return [self] * count
+                if name == "tabs":
+                    return [self] * len(args[0])  # type: ignore[arg-type]
+                if name in {"container", "expander", "spinner"}:
+                    return self
                 if name == "text_input":
-                    return args[1]
+                    return args[1] if len(args) > 1 else ""
                 if name == "selectbox":
                     return args[1][0]  # type: ignore[index]
                 if name in {"checkbox", "button"}:
@@ -501,13 +514,31 @@ def test_dashboard_pages_render_data_and_empty_states() -> None:
                 return {"total_rows": 6}
             if path == "/api/v1/forecasts/latest":
                 return {
-                    "items": [{"timestamp_utc": "2026-01-01T01:00:00Z", "predicted_value": 100}],
+                    "items": [
+                        {
+                            "timestamp_utc": "2026-01-01T01:00:00Z",
+                            "forecast_origin": "2026-01-01T00:00:00Z",
+                            "predicted_value": 100,
+                        }
+                    ],
                     "lineage": {"model_version": "1"},
+                }
+            if path == "/api/v1/forecasts":
+                return {
+                    "items": [
+                        {
+                            "timestamp_utc": "2026-01-01T01:00:00Z",
+                            "forecast_origin": "2026-01-01T00:00:00Z",
+                            "predicted_value": 100,
+                            "lineage": {"model_version": "1"},
+                        }
+                    ]
                 }
             if path == "/api/v1/anomalies":
                 return {
                     "items": [
                         {
+                            "anomaly_id": "anomaly-1",
                             "timestamp_utc": "2026-01-01T01:00:00Z",
                             "anomaly_score": 10,
                             "severity": "warning",
@@ -517,15 +548,61 @@ def test_dashboard_pages_render_data_and_empty_states() -> None:
                         }
                     ]
                 }
+            if path == "/api/v1/anomalies/anomaly-1":
+                return {
+                    "anomaly_id": "anomaly-1",
+                    "timestamp_utc": "2026-01-01T01:00:00Z",
+                    "anomaly_score": 10,
+                    "severity": "warning",
+                    "target": "demand_mw",
+                    "anomaly_type": "spike",
+                    "detector_name": "rules",
+                    "explanation": "Human review is required.",
+                }
             if path == "/api/v1/anomalies/summary":
                 return {"calibration_warnings": ["review calibration"]}
             if path == "/api/v1/alerts":
                 return {
-                    "items": [{"alert_id": "alert-1", "status": "open"}],
+                    "items": [
+                        {
+                            "alert_id": "alert-1",
+                            "status": "open",
+                            "severity": "warning",
+                            "target": "demand_mw",
+                            "anomaly_type": "spike",
+                        }
+                    ],
                     "pagination": {"total": 1},
                 }
+            if path == "/api/v1/alerts/alert-1":
+                return {
+                    "alert_id": "alert-1",
+                    "status": "open",
+                    "severity": "warning",
+                    "target": "demand_mw",
+                    "anomaly_type": "spike",
+                    "summary": "Human review is required.",
+                    "history": [],
+                }
             if path == "/api/v1/dispatches":
-                return {"items": [{"dispatch_run_id": "dispatch-1"}]}
+                return {
+                    "items": [
+                        {
+                            "dispatch_run_id": "dispatch-1",
+                            "battery_id": "battery-1",
+                            "objective_mode": "peak_shaving",
+                            "solver_status": "optimal",
+                            "forecast_origin": "2026-01-01T00:00:00Z",
+                        }
+                    ]
+                }
+            if path == "/api/v1/dispatches/dispatch-1":
+                return {
+                    "dispatch_run_id": "dispatch-1",
+                    "solver_status": "optimal",
+                    "peak_before_mw": 100,
+                    "peak_after_mw": 90,
+                }
             if path.endswith("/points"):
                 return {
                     "items": [
@@ -533,14 +610,29 @@ def test_dashboard_pages_render_data_and_empty_states() -> None:
                             "timestamp_utc": "2026-01-01T01:00:00Z",
                             "net_load_before_battery_mw": 100,
                             "net_load_after_battery_mw": 90,
+                            "charge_mw": 10,
+                            "discharge_mw": 0,
                             "soc_end_mwh": 50,
                         }
                     ]
                 }
             if path.endswith("/summary") and "dispatches" in path:
-                return {"peak_reduction_mw": 10.0}
+                return {
+                    "peak_reduction_mw": 10.0,
+                    "physics": {},
+                    "constraint_validation_passed": True,
+                }
             if path == "/api/v1/models":
-                return {"items": [{"name": "model", "version": "1"}]}
+                return {
+                    "items": [
+                        {
+                            "name": "model",
+                            "version": "1",
+                            "aliases": ["champion"],
+                            "training_metrics": {"wape": 4.0},
+                        }
+                    ]
+                }
             if path == "/api/v1/models/summary":
                 return {"registered_models": 1}
             raise AssertionError(path)
@@ -575,4 +667,4 @@ def test_dashboard_pages_render_data_and_empty_states() -> None:
         models_page.render,
     ):
         renderer(ui, empty)
-    assert sum(message.startswith("info:No") for message in ui.messages) >= 5
+    assert sum("gm-state" in message for message in ui.messages) >= 5
