@@ -1,5 +1,0 @@
-mlflow==3.14.0
-gridmind
-pandas<3,>=2.2
-lightgbm<5,>=4.5
-catboost<2,>=1.2

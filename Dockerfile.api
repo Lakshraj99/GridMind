@@ -5,7 +5,7 @@ WORKDIR /app
 RUN groupadd --system gridmind && useradd --system --gid gridmind --create-home gridmind
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
-RUN python -m pip install --upgrade pip && python -m pip install .
+RUN python -m pip install --upgrade pip && python -m pip install '.[api]'
 RUN mkdir -p /app/data /app/artifacts /app/mlartifacts && chown -R gridmind:gridmind /app
 USER gridmind
 EXPOSE 8000
