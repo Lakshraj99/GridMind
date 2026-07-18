@@ -279,17 +279,25 @@ tests/            offline unit and integration tests
 
 ## Screenshots
 
-No screenshots are committed by default. Capture sanitized portfolio assets after starting the real
-application and place them at:
+### Overview Dashboard
 
-- `docs/images/overview-dashboard.png`
-- `docs/images/forecast-dashboard.png`
-- `docs/images/anomaly-dashboard.png`
-- `docs/images/battery-dashboard.png`
-- `docs/images/api-docs.png`
+![GridMind Overview Dashboard](docs/images/overview-dashboard.png)
 
-Follow [`docs/images/README.md`](docs/images/README.md) so screenshots do not expose paths, keys,
-browser profiles, or terminal secrets.
+### Forecast Dashboard
+
+![GridMind Forecast Dashboard](docs/images/forecast-dashboard.png)
+
+### Anomaly Detection Dashboard
+
+![GridMind Anomaly Dashboard](docs/images/anomaly-dashboard.png)
+
+### Battery Dispatch Dashboard
+
+![GridMind Battery Dispatch Dashboard](docs/images/battery-dashboard.png)
+
+### FastAPI Documentation
+
+![GridMind FastAPI Documentation](docs/images/api-docs.png)
 
 ## Limitations and responsible use
 
